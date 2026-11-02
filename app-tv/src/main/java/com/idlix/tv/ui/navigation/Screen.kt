@@ -7,7 +7,11 @@ sealed class Screen(val route: String) {
     object Home : Screen("home")
     object Movies : Screen("movies")
     object Series : Screen("series")
-    object Search : Screen("search")
+    object Search : Screen("search?initialQuery={initialQuery}") {
+        fun createRoute(initialQuery: String? = null): String =
+            if (initialQuery.isNullOrBlank()) "search"
+            else "search?initialQuery=" + URLEncoder.encode(initialQuery, StandardCharsets.UTF_8.toString())
+    }
     object ContinueWatching : Screen("continue_watching")
     object Settings : Screen("settings")
     object DevTools : Screen("devtools")

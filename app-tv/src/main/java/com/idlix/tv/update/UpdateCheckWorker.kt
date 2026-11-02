@@ -34,6 +34,7 @@ class UpdateCheckWorker(
     override suspend fun doWork(): Result {
         val state = UpdateChecker.checkForUpdate(applicationContext, BuildConfig.VERSION_CODE.toLong())
         if (state is UpdateState.Available) {
+            PendingUpdateStore.save(applicationContext, state)
             showAvailableNotification(state)
         }
         return Result.success()
@@ -62,6 +63,16 @@ class UpdateCheckWorker(
         val launch = context.packageManager
             .getLaunchIntentForPackage(context.packageName)
             ?.let { intent ->
+                // Notification handoff: the flag routes MainActivity to
+                // Settings; the payload mirrors PendingUpdateStore so the
+                // Available row surfaces even if the store was cleared.
+                // Distinct from UpdateInstaller.EXTRA_PENDING_UPDATE (install
+                // step uri) — this flag carries a check payload, not a file.
+                intent.putExtra(EXTRA_PENDING_UPDATE, true)
+                intent.putExtra(EXTRA_UPDATE_VERSION, state.version)
+                intent.putExtra(EXTRA_UPDATE_NOTES, state.notes.take(1000))
+                intent.putExtra(EXTRA_UPDATE_ASSET_URL, state.assetUrl)
+                intent.putExtra(EXTRA_UPDATE_SIZE_BYTES, state.sizeBytes)
                 android.app.PendingIntent.getActivity(
                     context, 0, intent,
                     android.app.PendingIntent.FLAG_UPDATE_CURRENT or
@@ -99,6 +110,18 @@ class UpdateCheckWorker(
         const val WORK_NAME = "idlix_update_check"
         private const val CHANNEL_ID = "idlix_updates"
         private const val NOTIFICATION_ID = 9401
+
+        /**
+         * Notification content-intent handoff: boolean flag routing
+         * MainActivity.onNewIntent to Settings, plus the Available payload.
+         * The same payload is persisted in [PendingUpdateStore] (consumed by
+         * SettingsViewModel on init); the extras are a mirror, not the source.
+         */
+        const val EXTRA_PENDING_UPDATE = "com.idlix.tv.extra.PENDING_UPDATE"
+        const val EXTRA_UPDATE_VERSION = "com.idlix.tv.extra.UPDATE_VERSION"
+        const val EXTRA_UPDATE_NOTES = "com.idlix.tv.extra.UPDATE_NOTES"
+        const val EXTRA_UPDATE_ASSET_URL = "com.idlix.tv.extra.UPDATE_ASSET_URL"
+        const val EXTRA_UPDATE_SIZE_BYTES = "com.idlix.tv.extra.UPDATE_SIZE_BYTES"
 
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<UpdateCheckWorker>(24, TimeUnit.HOURS)

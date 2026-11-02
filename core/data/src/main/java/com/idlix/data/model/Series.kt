@@ -15,11 +15,16 @@ data class SeriesItem(
     val slug: String = "",
     val posterPath: String? = null,
     val backdropPath: String? = null,
+    val logoPath: String? = null,
+    val overview: String? = null,
     val firstAirDate: String? = null,
     @Serializable(with = FlexibleStringSerializer::class)
     val voteAverage: String? = null,
     val viewCount: Long = 0,
     val numberOfSeasons: Int? = null,
+    val numberOfEpisodes: Int? = null,
+    val status: String? = null,
+    val trailerUrl: String? = null,
     val country: String? = null,
     val contentType: String = "tv_series",
     val genres: List<Genre> = emptyList(),
@@ -40,12 +45,42 @@ data class SeriesItem(
         slug = slug,
         posterPath = posterPath,
         backdropPath = backdropPath,
+        logoPath = logoPath,
+        overview = overview,
         releaseDate = firstAirDate,
+        firstAirDate = firstAirDate,
         voteAverage = voteAverage,
         viewCount = viewCount,
-        contentType = "tv_series"
+        numberOfSeasons = numberOfSeasons,
+        numberOfEpisodes = numberOfEpisodes,
+        status = status,
+        country = country,
+        trailerUrl = trailerUrl,
+        contentType = "tv_series",
+        genres = genres
     )
 }
+
+fun MovieItem.toSeriesItem(): SeriesItem = SeriesItem(
+    id = id,
+    title = title,
+    slug = slug,
+    posterPath = posterPath,
+    backdropPath = backdropPath,
+    logoPath = logoPath,
+    overview = overview,
+    firstAirDate = firstAirDate ?: releaseDate,
+    voteAverage = voteAverage,
+    viewCount = viewCount,
+    numberOfSeasons = numberOfSeasons,
+    numberOfEpisodes = numberOfEpisodes,
+    status = status,
+    trailerUrl = trailerUrl,
+    country = country,
+    contentType = "tv_series",
+    genres = genres,
+    hasVideo = hasVideo
+)
 
 @Serializable
 data class SeriesDetail(

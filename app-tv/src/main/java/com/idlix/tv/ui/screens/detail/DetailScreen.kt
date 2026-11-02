@@ -27,18 +27,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import com.idlix.data.local.WatchHistoryStore
 import com.idlix.tv.ui.components.TvErrorState
@@ -51,9 +65,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.tv.material3.Border
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
@@ -61,15 +77,20 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
 import com.idlix.tv.R
 import com.idlix.data.model.CastMember
 import com.idlix.data.model.EpisodeItem
 import com.idlix.tv.ui.components.TvLoadingSpinner
-import com.idlix.tv.ui.components.dpadBackHandler
-import com.idlix.tv.ui.components.railFocusFrame
+import com.idlix.tv.ui.components.TvSizing
+import com.idlix.tv.ui.components.toFullQualityBackdropUrl
+import com.idlix.tv.ui.components.toFullQualityPosterUrl
 import com.idlix.tv.ui.components.tvDetailHeaderHeight
+import com.idlix.tv.ui.components.tvGridFocusFrame
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixDarkCard
 import com.idlix.tv.ui.theme.NetflixGold
@@ -77,7 +98,7 @@ import com.idlix.tv.ui.theme.NetflixLightGray
 import com.idlix.tv.ui.theme.NetflixRed
 import com.idlix.tv.ui.theme.NetflixWhite
 
-@OptIn(ExperimentalTvMaterial3Api::class)
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun DetailScreen(
     contentType: String,
@@ -92,13 +113,37 @@ fun DetailScreen(
     }
 
     val uiState by viewModel.uiState.collectAsState()
+    val detailListState = rememberLazyListState()
+    val detailScope = rememberCoroutineScope()
     val playButtonFocusRequester = remember { FocusRequester() }
-    // Explicit vertical chain (absolute control): Play/Trailer DOWN targets
-    // the season row (or episodes when seasons are absent, else stays).
-    // Season/episode LazyRows expose container links so UP/DOWN never relies
-    // on geometry — last-row DOWN stays via Cancel (cast is non-focusable).
+    val trailerButtonFocusRequester = remember { FocusRequester() }
     val seasonRailLink = remember { FocusRequester() }
     val episodesRailLink = remember { FocusRequester() }
+
+    var lastFocusedSeasonIndex by remember(slug) { mutableIntStateOf(0) }
+    var lastFocusedEpisodeIndex by remember(slug, uiState.selectedSeason?.id) { mutableIntStateOf(0) }
+    val seasonRequesters = remember { mutableMapOf<Int, FocusRequester>() }
+    val seasonFallbackRequester = remember { FocusRequester() }
+    val episodeRequesters = remember { mutableMapOf<Int, FocusRequester>() }
+    val episodeFallbackRequester = remember { FocusRequester() }
+
+    var playFocused by remember { mutableStateOf(false) }
+    var trailerFocused by remember { mutableStateOf(false) }
+    var headerFocused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playFocused, trailerFocused) {
+        val isAnyHeaderFocused = playFocused || trailerFocused
+        if (isAnyHeaderFocused && !headerFocused) {
+            headerFocused = true
+            if (detailListState.firstVisibleItemIndex > 0 || detailListState.firstVisibleItemScrollOffset > 0) {
+                try {
+                    detailListState.animateScrollToItem(0)
+                } catch (_: Exception) {}
+            }
+        } else if (!isAnyHeaderFocused) {
+            headerFocused = false
+        }
+    }
 
     // Latest unfinished history entry for this title (matched by slug, or movie id):
     // drives the Resume label + seeks to the saved position via the player.
@@ -113,13 +158,18 @@ fun DetailScreen(
             ?.takeIf { it.isUnfinished }
     }
 
-    // Place default focus on "Putar Sekarang" / "Putar Episode 1" as soon as media details load
+    // Place default focus on "Putar Sekarang" / "Putar Episode 1" as soon as media details load.
+    // Park + retry (8x40ms): the nav-transition window drops the first
+    // request, so re-assert — entry never parks black. Error states own
+    // their Retry focus (see TvErrorState); loading holds none.
     LaunchedEffect(uiState.isLoading, uiState.movie, uiState.series) {
         if (!uiState.isLoading && (uiState.movie != null || uiState.series != null)) {
-            delay(120)
-            try {
-                playButtonFocusRequester.requestFocus()
-            } catch (e: Exception) {}
+            repeat(8) {
+                try {
+                    playButtonFocusRequester.requestFocus()
+                } catch (e: Exception) {}
+                delay(40)
+            }
         }
     }
 
@@ -127,7 +177,6 @@ fun DetailScreen(
         modifier = modifier
             .fillMaxSize()
             .background(NetflixBlack)
-            .dpadBackHandler(onBack)
     ) {
         if (uiState.isLoading) {
             TvLoadingSpinner(
@@ -146,12 +195,23 @@ fun DetailScreen(
             val title = uiState.movie?.title ?: uiState.series?.title ?: ""
             val overview = uiState.movie?.overview ?: uiState.series?.overview ?: ""
             val backdropUrl = uiState.movie?.fullBackdropUrl ?: uiState.series?.fullBackdropUrl ?: ""
+            val highResBackdropUrl = remember(backdropUrl) { backdropUrl.toFullQualityBackdropUrl() }
+            val backdropRequest = remember(highResBackdropUrl) {
+                ImageRequest.Builder(context)
+                    .data(highResBackdropUrl)
+                    .size(1920, 1080)
+                    .precision(Precision.EXACT)
+                    .allowRgb565(false)
+                    .crossfade(false)
+                    .build()
+            }
             val rating = uiState.movie?.voteAverage ?: uiState.series?.voteAverage ?: ""
             val year = (uiState.movie?.releaseDate ?: uiState.series?.firstAirDate)?.take(4) ?: ""
             val genres = (uiState.movie?.genres ?: uiState.series?.genres ?: emptyList()).joinToString(", ") { it.name }
             val castList = uiState.movie?.cast ?: uiState.series?.cast ?: emptyList()
 
             LazyColumn(
+                state = detailListState,
                 modifier = Modifier
                     .fillMaxSize()
                     .focusRestorer()
@@ -166,7 +226,7 @@ fun DetailScreen(
                             .height(tvDetailHeaderHeight())
                     ) {
                         AsyncImage(
-                            model = backdropUrl,
+                            model = backdropRequest,
                             contentDescription = title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
@@ -242,8 +302,9 @@ fun DetailScreen(
                             Text(
                                 text = title,
                                 color = NetflixWhite,
-                                fontSize = 36.sp,
-                                fontWeight = FontWeight.Black,
+                                style = MaterialTheme.typography.displaySmall.copy(
+                                    fontWeight = FontWeight.Black
+                                ),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -373,6 +434,16 @@ fun DetailScreen(
                             // handler. Secondary to Play — dark card, white ring.
                             val trailerUrl = uiState.movie?.trailerUrl
                                 ?: uiState.series?.trailerUrl
+                            val hasSeasons = uiState.series?.seasons?.isNotEmpty() == true
+                            val hasEpisodes = !uiState.isLoadingEpisodes && uiState.episodes.isNotEmpty()
+                            val downTarget = if (contentType == "tv_series") {
+                                when {
+                                    hasSeasons -> seasonRailLink
+                                    hasEpisodes -> episodesRailLink
+                                    else -> FocusRequester.Cancel
+                                }
+                            } else FocusRequester.Cancel
+
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Button(
                                     onClick = {
@@ -417,27 +488,21 @@ fun DetailScreen(
                                         focusedContainerColor = NetflixRed,
                                         focusedContentColor = NetflixWhite
                                     ),
-                                    scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                                    scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
                                     border = ButtonDefaults.border(
                                         focusedBorder = Border(
-                                            border = BorderStroke(2.dp, NetflixWhite)
+                                            border = BorderStroke(2.5.dp, NetflixWhite)
                                         )
                                     ),
                                     shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp)),
                                     modifier = Modifier
                                         .focusRequester(playButtonFocusRequester)
+                                        .onFocusChanged { playFocused = it.isFocused }
                                         .focusProperties {
-                                            // Col-0 LEFT + fullscreen UP stay;
-                                            // DOWN targets seasons (series) or
-                                            // episodes, else stays (movie).
                                             left = FocusRequester.Cancel
+                                            right = if (!trailerUrl.isNullOrBlank()) trailerButtonFocusRequester else FocusRequester.Cancel
                                             up = FocusRequester.Cancel
-                                            if (contentType == "tv_series") {
-                                                val hasSeasons = uiState.series?.seasons?.isNotEmpty() == true
-                                                down = if (hasSeasons) seasonRailLink else episodesRailLink
-                                            } else {
-                                                down = FocusRequester.Cancel
-                                            }
+                                            down = downTarget
                                         }
                                 ) {
                                     Icon(
@@ -468,28 +533,28 @@ fun DetailScreen(
                                         colors = ButtonDefaults.colors(
                                             containerColor = NetflixDarkCard,
                                             contentColor = NetflixWhite,
-                                            focusedContainerColor = NetflixWhite,
-                                            focusedContentColor = NetflixBlack
+                                            // Stay dark on focus (never invert to
+                                            // white): the ring must read on the
+                                            // dark header, same as rows.
+                                            focusedContainerColor = NetflixDarkCard,
+                                            focusedContentColor = NetflixWhite
                                         ),
-                                        scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                                        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
                                         border = ButtonDefaults.border(
                                             focusedBorder = Border(
-                                                border = BorderStroke(2.dp, NetflixWhite)
+                                                border = BorderStroke(2.5.dp, NetflixWhite)
                                             )
                                         ),
                                         shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp)),
-                                        modifier = Modifier.focusProperties {
-                                            // Terminal RIGHT + fullscreen UP stay;
-                                            // DOWN mirrors Play (seasons/episodes).
-                                            right = FocusRequester.Cancel
-                                            up = FocusRequester.Cancel
-                                            if (contentType == "tv_series") {
-                                                val hasSeasons = uiState.series?.seasons?.isNotEmpty() == true
-                                                down = if (hasSeasons) seasonRailLink else episodesRailLink
-                                            } else {
-                                                down = FocusRequester.Cancel
+                                        modifier = Modifier
+                                            .focusRequester(trailerButtonFocusRequester)
+                                            .onFocusChanged { trailerFocused = it.isFocused }
+                                            .focusProperties {
+                                                left = playButtonFocusRequester
+                                                right = FocusRequester.Cancel
+                                                up = FocusRequester.Cancel
+                                                down = downTarget
                                             }
-                                        }
                                     ) {
                                         Text(
                                             text = stringResource(R.string.trailer),
@@ -506,70 +571,94 @@ fun DetailScreen(
                 // If Series: Season selector & Episode list
                 if (contentType == "tv_series" && uiState.series != null) {
                     item {
-                        Column(modifier = Modifier.padding(horizontal = 48.dp, vertical = 12.dp)) {
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
                             Text(
                                 text = stringResource(R.string.select_season_episode),
                                 color = NetflixWhite,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(horizontal = 48.dp)
                             )
 
                             Spacer(modifier = Modifier.height(10.dp))
 
                             // Seasons Row
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                // Restorer + scale-allowance insets to match
-                                // the episodes row: edge pills settle with
-                                // their 1.08x ring fully inside the viewport.
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                                modifier = Modifier
-                                    .focusRequester(seasonRailLink)
-                                    .focusRestorer()
-                            ) {
-                                val seasons = uiState.series?.seasons ?: emptyList()
-                                items(seasons.size) { sIndex ->
-                                    val season = seasons[sIndex]
-                                    val isFirstSeason = sIndex == 0
-                                    val isLastSeason = sIndex == seasons.lastIndex
-                                    val isSelected = season.id == uiState.selectedSeason?.id ||
-                                            season.seasonNumber == uiState.selectedSeason?.seasonNumber
-                                    // Focus frame: same bring-into-view
-                                    // headroom idiom as the episode cards.
-                                    Box(
-                                        Modifier
-                                            .railFocusFrame()
-                                            .padding(horizontal = 4.dp, vertical = 4.dp)
-                                    ) {
-                                    Button(
-                                        onClick = { viewModel.selectSeason(slug, season) },
-                                        colors = ButtonDefaults.colors(
-                                            containerColor = if (isSelected) NetflixRed else NetflixDarkCard,
-                                            contentColor = NetflixWhite,
-                                            focusedContainerColor = if (isSelected) NetflixRed else NetflixWhite,
-                                            focusedContentColor = if (isSelected) NetflixWhite else NetflixBlack
-                                        ),
-                                        scale = ButtonDefaults.scale(focusedScale = 1.08f),
-                                        border = ButtonDefaults.border(
-                                            focusedBorder = Border(
-                                                border = BorderStroke(2.dp, NetflixWhite)
-                                            )
-                                        ),
-                                        shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp)),
-                                        modifier = Modifier.focusProperties {
-                                            up = playButtonFocusRequester
-                                            down = episodesRailLink
-                                            if (isFirstSeason) left = FocusRequester.Cancel
-                                            if (isLastSeason) right = FocusRequester.Cancel
+                            val seasons = uiState.series?.seasons ?: emptyList()
+                            if (seasons.isNotEmpty()) {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 48.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .focusRequester(seasonRailLink)
+                                        .focusRestorer { seasonFallbackRequester }
+                                ) {
+                                    items(seasons.size) { sIndex ->
+                                        val season = seasons[sIndex]
+                                        val isFirstSeason = sIndex == 0
+                                        val isLastSeason = sIndex == seasons.lastIndex
+                                        val isSelected = season.id == uiState.selectedSeason?.id ||
+                                                season.seasonNumber == uiState.selectedSeason?.seasonNumber
+                                        val sRequester = seasonRequesters.getOrPut(sIndex) { FocusRequester() }
+                                        val isSeasonFallback = sIndex == lastFocusedSeasonIndex.coerceIn(0, (seasons.size - 1).coerceAtLeast(0))
+
+                                        Box(
+                                            Modifier.tvGridFocusFrame(horizontalPadding = 2.dp, verticalPadding = 6.dp)
+                                        ) {
+                                            Button(
+                                                onClick = { viewModel.selectSeason(slug, season) },
+                                                colors = ButtonDefaults.colors(
+                                                    containerColor = if (isSelected) NetflixRed else NetflixDarkCard,
+                                                    contentColor = NetflixWhite,
+                                                    // Unselected stays dark on focus
+                                                    // (never inverts to white) so the
+                                                    // white ring stays visible.
+                                                    focusedContainerColor = if (isSelected) NetflixRed else NetflixDarkCard,
+                                                    focusedContentColor = NetflixWhite
+                                                ),
+                                                scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
+                                                border = ButtonDefaults.border(
+                                                    focusedBorder = Border(
+                                                        border = BorderStroke(2.5.dp, NetflixWhite)
+                                                    )
+                                                ),
+                                                shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp)),
+                                                modifier = Modifier
+                                                    .focusRequester(sRequester)
+                                                    .then(if (isSeasonFallback) Modifier.focusRequester(seasonFallbackRequester) else Modifier)
+                                                    .onFocusChanged { if (it.isFocused) lastFocusedSeasonIndex = sIndex }
+                                                    .focusProperties {
+                                                        up = playButtonFocusRequester
+                                                        down = if (!uiState.isLoadingEpisodes && uiState.episodes.isNotEmpty()) episodesRailLink else FocusRequester.Cancel
+                                                        left = if (isFirstSeason) FocusRequester.Cancel else (seasonRequesters[sIndex - 1] ?: FocusRequester.Default)
+                                                        right = if (isLastSeason) FocusRequester.Cancel else (seasonRequesters[sIndex + 1] ?: FocusRequester.Default)
+                                                    }
+                                                    .onPreviewKeyEvent { event ->
+                                                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                                                            try {
+                                                                playButtonFocusRequester.requestFocus()
+                                                                true
+                                                            } catch (_: Exception) {
+                                                                detailScope.launch {
+                                                                    try {
+                                                                        detailListState.scrollToItem(0)
+                                                                        withFrameNanos {}
+                                                                        playButtonFocusRequester.requestFocus()
+                                                                    } catch (_: Exception) {}
+                                                                }
+                                                                true
+                                                            }
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }
+                                            ) {
+                                                Text(text = season.name)
+                                            }
                                         }
-                                    ) {
-                                        Text(text = season.name)
-                                    }
                                     }
                                 }
-                            }
 
-                            Spacer(modifier = Modifier.height(16.dp))
+                                Spacer(modifier = Modifier.height(16.dp))
+                            }
 
                             // Episodes List
                             if (uiState.isLoadingEpisodes) {
@@ -583,27 +672,22 @@ fun DetailScreen(
                                 }
                             } else {
                                 LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                    // Scale-allowance end insets: the parent
-                                    // column already insets the start, so the
-                                    // last card settles with its ring clear.
-                                    contentPadding = PaddingValues(horizontal = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                    contentPadding = PaddingValues(horizontal = 48.dp, vertical = 8.dp),
                                     modifier = Modifier
                                         .focusRequester(episodesRailLink)
-                                        .focusRestorer()
+                                        .focusRestorer { episodeFallbackRequester }
                                 ) {
                                     items(uiState.episodes.size) { epIndex ->
                                         val ep = uiState.episodes[epIndex]
                                         val isFirstEp = epIndex == 0
                                         val isLastEp = epIndex == uiState.episodes.lastIndex
-                                        // 12dp focus frame: the row sits 48dp
-                                        // from the edge, but an UP-arrival can
-                                        // settle the card at the viewport top —
-                                        // the frame keeps the ring intact.
+                                        val epRequester = episodeRequesters.getOrPut(epIndex) { FocusRequester() }
+                                        val isEpFallback = epIndex == lastFocusedEpisodeIndex.coerceIn(0, (uiState.episodes.size - 1).coerceAtLeast(0))
+                                        val hasSeasons = uiState.series?.seasons?.isNotEmpty() == true
+
                                         Box(
-                                            Modifier
-                                                .railFocusFrame()
-                                                .padding(vertical = 12.dp)
+                                            Modifier.tvGridFocusFrame(horizontalPadding = 2.dp, verticalPadding = 10.dp)
                                         ) {
                                             TvEpisodeCard(
                                                 episode = ep,
@@ -619,15 +703,16 @@ fun DetailScreen(
                                                         ep.episodeNumber
                                                     )
                                                 },
-                                                modifier = Modifier.focusProperties {
-                                                    val hasSeasons = uiState.series?.seasons?.isNotEmpty() == true
-                                                    up = if (hasSeasons) seasonRailLink else playButtonFocusRequester
-                                                    // Cast is non-focusable: last
-                                                    // content row DOWN stays.
-                                                    down = FocusRequester.Cancel
-                                                    if (isFirstEp) left = FocusRequester.Cancel
-                                                    if (isLastEp) right = FocusRequester.Cancel
-                                                }
+                                                modifier = Modifier
+                                                    .focusRequester(epRequester)
+                                                    .then(if (isEpFallback) Modifier.focusRequester(episodeFallbackRequester) else Modifier)
+                                                    .onFocusChanged { if (it.isFocused) lastFocusedEpisodeIndex = epIndex }
+                                                    .focusProperties {
+                                                        up = if (hasSeasons) seasonRailLink else playButtonFocusRequester
+                                                        down = FocusRequester.Cancel
+                                                        left = if (isFirstEp) FocusRequester.Cancel else (episodeRequesters[epIndex - 1] ?: FocusRequester.Default)
+                                                        right = if (isLastEp) FocusRequester.Cancel else (episodeRequesters[epIndex + 1] ?: FocusRequester.Default)
+                                                    }
                                             )
                                         }
                                     }
@@ -644,8 +729,7 @@ fun DetailScreen(
                             Text(
                                 text = stringResource(R.string.cast),
                                 color = NetflixWhite,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.headlineSmall,
                                 modifier = Modifier.padding(bottom = 10.dp)
                             )
 
@@ -677,6 +761,17 @@ fun TvEpisodeCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val highResStillUrl = remember(episode.fullStillUrl) { episode.fullStillUrl.toFullQualityBackdropUrl() }
+    val stillRequest = remember(highResStillUrl) {
+        ImageRequest.Builder(context)
+            .data(highResStillUrl)
+            .size(640, 360)
+            .precision(Precision.EXACT)
+            .allowRgb565(false)
+            .crossfade(false)
+            .build()
+    }
     // Black halo outside the white ring so the selection reads on bright
     // stills too (same B&W-only treatment as the rail cards).
     var epFocused by remember { mutableStateOf(false) }
@@ -690,75 +785,84 @@ fun TvEpisodeCard(
         colors = CardDefaults.colors(
             containerColor = NetflixDarkCard
         ),
-        scale = CardDefaults.scale(focusedScale = 1.08f),
+        scale = CardDefaults.scale(focusedScale = TvSizing.CardFocusScale),
         border = CardDefaults.border(
+            border = Border(
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+            ),
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NetflixWhite)
+                border = BorderStroke(2.5.dp, NetflixWhite)
             )
         )
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithContent {
+                    drawContent()
+                    if (epFocused) {
+                        val stroke = 2.dp.toPx()
+                        drawRoundRect(
+                            color = Color.Black,
+                            topLeft = Offset(stroke / 2, stroke / 2),
+                            size = Size(size.width - stroke, size.height - stroke),
+                            cornerRadius = CornerRadius(8.dp.toPx()),
+                            style = Stroke(width = stroke)
+                        )
+                    }
+                }
+        ) {
             Column(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(115.dp)
-            ) {
-                AsyncImage(
-                    model = episode.fullStillUrl,
-                    contentDescription = episode.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(6.dp)
-                        .background(Color(0xBB000000), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                        .fillMaxWidth()
+                        .height(115.dp)
                 ) {
+                    AsyncImage(
+                        model = stillRequest,
+                        contentDescription = episode.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(6.dp)
+                            .background(Color(0xBB000000), RoundedCornerShape(3.dp))
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.episode_badge, episode.episodeNumber),
+                            color = NetflixWhite,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.padding(8.dp)) {
                     Text(
-                        text = stringResource(R.string.episode_badge, episode.episodeNumber),
+                        text = stringResource(
+                            R.string.episode_title_format,
+                            episode.episodeNumber,
+                            episode.name
+                        ),
                         color = NetflixWhite,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = episode.overview ?: "",
+                        color = NetflixLightGray,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-            }
-
-            Column(modifier = Modifier.padding(8.dp)) {
-                Text(
-                    text = stringResource(
-                        R.string.episode_title_format,
-                        episode.episodeNumber,
-                        episode.name
-                    ),
-                    color = NetflixWhite,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = episode.overview ?: "",
-                    color = NetflixLightGray,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            // Dark inner edge (pairs with the white focus ring) so the
-            // selection boundary reads on bright stills too. B&W only.
-            if (epFocused) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .border(2.dp, Color.Black, RoundedCornerShape(8.dp))
-                )
-            }
             }
         }
     }
@@ -766,6 +870,7 @@ fun TvEpisodeCard(
 
 @Composable
 fun TvCastCard(cast: CastMember) {
+    val highResProfileUrl = remember(cast.fullProfileUrl) { cast.fullProfileUrl.toFullQualityPosterUrl() }
     // Deliberately NOT focusable: cast rows are informational only (no detail
     // destination), so a focusable no-op Card would trap the D-pad on a dead control.
     Column(
@@ -777,7 +882,7 @@ fun TvCastCard(cast: CastMember) {
             .padding(vertical = 8.dp, horizontal = 4.dp)
     ) {
         AsyncImage(
-            model = cast.fullProfileUrl,
+            model = highResProfileUrl,
             contentDescription = cast.name,
             contentScale = ContentScale.Crop,
             modifier = Modifier

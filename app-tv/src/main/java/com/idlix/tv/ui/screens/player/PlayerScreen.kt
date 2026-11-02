@@ -2,8 +2,6 @@ package com.idlix.tv.ui.screens.player
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.Color
-import android.net.Uri
 import android.view.KeyEvent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -40,19 +38,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
-import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
-import androidx.media3.ui.CaptionStyleCompat
-import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -60,6 +53,10 @@ import androidx.tv.material3.Text
 import com.idlix.tv.ui.components.TvLoadingSpinner
 import com.idlix.tv.ui.input.GamepadKeys
 import com.idlix.tv.ui.input.GamepadKeys.PlayerActions
+import com.idlix.tv.ui.screens.player.playback.PlayerSessionManager
+import com.idlix.tv.ui.screens.player.playback.PlayerSurfaceHost
+import com.idlix.tv.player.PlaybackService
+import com.idlix.tv.ui.components.TvSizing
 import com.idlix.tv.R
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixLightGray
@@ -67,10 +64,6 @@ import com.idlix.tv.ui.theme.NetflixRed
 import com.idlix.tv.ui.theme.NetflixWhite
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-// Subtitles sit at a fixed fraction of the SCREEN height, independent of the
-// video aspect: identical placement for 16:9, 21:9, 4:3 on any panel.
-private const val SubtitleBottomFraction = 0.08f
 
 @OptIn(UnstableApi::class, ExperimentalTvMaterial3Api::class)
 @Composable
@@ -105,20 +98,23 @@ fun PlayerScreen(
     val rootFocusRequester = remember { FocusRequester() }
     val playButtonFocusRequester = remember { FocusRequester() }
 
-    var activePlayer: ExoPlayer? by remember { mutableStateOf(null) }
-    // Loudness normalizer ("Audio stabilizer"): session-bound INSERT effect,
-    // toggle-gated. Same package as PlayerQualityPrefs, no import needed.
-    val audioStabilizer = remember { AudioStabilizer() }
-    // Stage-1 PCM normalizer (same shared stabilizer toggle; no session).
-    val loudnessNormalizer = remember { LoudnessNormalizeProcessor() }
+    // Transport handle: the connected MediaController (a Player). The concrete
+    // ExoPlayer lives in PlaybackService; every call below stays on the
+    // Player interface so the D-pad key table never needs the service player.
+    val sessionManager = remember(context) { PlayerSessionManager(context) }
+    val controller by sessionManager.controller.collectAsState()
+    var activePlayer: Player? by remember { mutableStateOf(null) }
+    // Both DSP stages live in the service now; the screen only flips the
+    // shared persisted toggle live through the manager bridge.
     var stabilizerEnabled by remember { mutableStateOf(loadAudioStabilizer(context)) }
     val qualityReturnFocusRequester = remember { FocusRequester() }
     var isQualityPickerVisible by remember { mutableStateOf(false) }
-    var selectedQuality by remember { mutableStateOf(loadPlaybackQuality(context)) }
-    // Zoom-fill aspect holder as a stable State object so the PlayerView
-    // update block always reads the live value.
-    val zoomState = remember { mutableStateOf(loadVideoZoom(context)) }
-    var isZoom by zoomState
+    val selectedQuality by viewModel.selectedQuality.collectAsState()
+    // Caption overlay ref: PlayerSurfaceHost owns the screen-level
+    // SubtitleView (outside the video frame, so captions always follow the
+    // screen with fixed-fraction padding on every panel size). Fed via
+    // scale to the screen, text cues sit at screen-height fraction.
+    val screenSubsRef = remember { mutableStateOf<SubtitleView?>(null) }
     var availableHeights by remember { mutableStateOf(emptySet<Int>()) }
     var videoW by remember { mutableIntStateOf(0) }
     var videoH by remember { mutableIntStateOf(0) }
@@ -140,9 +136,9 @@ fun PlayerScreen(
     val speedReturnFocusRequester = remember { FocusRequester() }
     val subtitleReturnFocusRequester = remember { FocusRequester() }
     var isSpeedPickerVisible by remember { mutableStateOf(false) }
-    var selectedSpeed by remember { mutableStateOf(loadPlaybackSpeed(context)) }
+    val selectedSpeed by viewModel.selectedSpeed.collectAsState()
     var availableAudioTracks by remember { mutableStateOf(emptyList<TvAudioOption>()) }
-    var selectedAudioLang by remember { mutableStateOf(loadAudioLanguage(context)) }
+    val selectedAudioLang by viewModel.audioLanguage.collectAsState()
     val tryAgainFocusRequester = remember { FocusRequester() }
     fun closeSpeedPicker() {
         isSpeedPickerVisible = false
@@ -160,6 +156,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(contentType, contentId) {
+        viewModel.loadPickerTokens()
         viewModel.loadStream(
             contentType = contentType,
             contentId = contentId,
@@ -172,12 +169,39 @@ fun PlayerScreen(
         )
     }
 
+    // MediaController connect once per screen entry; released on dispose.
+    // The service player keeps ownership across reconnects.
+    LaunchedEffect(Unit) {
+        sessionManager.connect()
+    }
+    DisposableEffect(Unit) {
+        onDispose { sessionManager.release() }
+    }
+    // Mirror the controller into the transport handle the key table reads.
+    LaunchedEffect(controller) {
+        activePlayer = controller
+    }
+
+    // Aspect application (the ONLY scaling writer): the controller is a
+    // MediaController, which exposes no setVideoScalingMode (the Media3 1.6.1
+    // session protocol forwards surfaces but has no scaling command —
+    // verified against the AAR). TV app version: the film always auto-fits
+    // the screen — FIT shows the entire picture (black bars on 21:9 scope,
+    // full-bleed on 16:9) and NEVER stretches; there is no zoom control.
+    // Applied live with no rebuild; the fresh service player boots at FIT.
+    LaunchedEffect(controller) {
+        try {
+            PlaybackService.currentPlayer()?.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT)
+        } catch (_: Exception) {}
+    }
+
     LaunchedEffect(Unit) {
         rootFocusRequester.requestFocus()
     }
 
-    // Stabilizer toggle applies live to both stages (Settings flip while
-    // playing): stage-1 PCM normalizer + stage-2 session effect, no rebuild.
+    // Stabilizer toggle applies live to both service stages (Settings flip
+    // while playing): stage-1 PCM normalizer + stage-2 session effect, no
+    // rebuild. The screen only flips the shared persisted toggle.
     DisposableEffect(context) {
         val sp = context.applicationContext.getSharedPreferences(
             "idlix_tv_prefs", Context.MODE_PRIVATE
@@ -189,12 +213,7 @@ fun PlayerScreen(
         onDispose { sp.unregisterOnSharedPreferenceChangeListener(listener) }
     }
     LaunchedEffect(stabilizerEnabled) {
-        try {
-            loudnessNormalizer.setEnabled(stabilizerEnabled)
-        } catch (_: Exception) {}
-        try {
-            audioStabilizer.setEnabled(stabilizerEnabled)
-        } catch (_: Exception) {}
+        sessionManager.syncStabilizerEnabled(stabilizerEnabled)
     }
 
     // Auto-hide controls after 6 seconds of inactivity, paused during modal, scrubbing, or next episode prompt
@@ -207,6 +226,9 @@ fun PlayerScreen(
             delay(6000)
             showControls = false
         } else {
+            // Post-exit beat: let the overlay fade-out release focus first so
+            // the root request lands on a focus-less tree (no dead keys).
+            delay(100)
             try {
                     if (!isNextPromptVisible && !uiState.isSubtitlePickerVisible && !isQualityPickerVisible) {
                     rootFocusRequester.requestFocus()
@@ -430,7 +452,8 @@ fun PlayerScreen(
                             }
                         }
                         KeyEvent.KEYCODE_MENU,
-                        KeyEvent.KEYCODE_INFO -> {
+                        KeyEvent.KEYCODE_INFO,
+                        KeyEvent.KEYCODE_GUIDE -> {
                             if (isNextPromptVisible || isQualityPickerVisible || isSpeedPickerVisible || uiState.isSubtitlePickerVisible) {
                                 false
                             } else {
@@ -529,10 +552,10 @@ fun PlayerScreen(
                             focusedContainerColor = NetflixRed,
                             focusedContentColor = NetflixWhite
                         ),
-                        scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
                         border = ButtonDefaults.border(
                             focusedBorder = Border(
-                                border = BorderStroke(2.dp, NetflixWhite)
+                                border = BorderStroke(2.5.dp, NetflixWhite)
                             )
                         ),
                         shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp)),
@@ -546,13 +569,16 @@ fun PlayerScreen(
                         colors = ButtonDefaults.colors(
                             containerColor = NetflixLightGray.copy(alpha = 0.3f),
                             contentColor = NetflixWhite,
-                            focusedContainerColor = NetflixWhite,
-                            focusedContentColor = NetflixLightGray
+                            // Stay translucent on focus (never invert to
+                            // white): the white ring must read on the dark
+                            // scrim, same treatment as the subtitle rows.
+                            focusedContainerColor = NetflixLightGray.copy(alpha = 0.3f),
+                            focusedContentColor = NetflixWhite
                         ),
-                        scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
                         border = ButtonDefaults.border(
                             focusedBorder = Border(
-                                border = BorderStroke(2.dp, NetflixWhite)
+                                border = BorderStroke(2.5.dp, NetflixWhite)
                             )
                         ),
                         shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp))
@@ -564,120 +590,41 @@ fun PlayerScreen(
         } else if (uiState.resolvedStream != null) {
             val resolved = uiState.resolvedStream!!
 
-            val tokenQuery = remember(resolved.hlsMasterUrl) {
-                try {
-                    Uri.parse(resolved.hlsMasterUrl).query.orEmpty()
-                } catch (_: Exception) {
-                    ""
-                }
-            }
-
-            val httpDataSourceFactory = remember(tokenQuery) {
-                MediaSourceHelper.createHttpDataSourceFactory(tokenQuery)
-            }
-
-            val exoPlayer = remember(context, resolved.hlsMasterUrl) {
-                val renderersFactory = MediaSourceHelper.createRenderersFactory(context, loudnessNormalizer)
-
-                // P0 streaming backlog: deep max buffers ride out mirror stalls;
-                // lean start threshold for a faster first frame.
-                val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        30000,
-                        60000,
-                        1500,
-                        5000
-                    )
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build()
-
-                // Start ABR at 4 Mbps so the first pick is HD on decent links
-                // instead of ramping up from the ~1 Mbps default.
-                val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-                    .setInitialBitrateEstimate(4_000_000L)
-                    .build()
-
-                // ABR damping: steadier rungs on mirror-CDN variance (segment-boundary
-                // policy only, zero GPU cost). Deep 30s/60s buffers tolerate near-defaults.
-                val trackSelector = DefaultTrackSelector(
-                    context,
-                    AdaptiveTrackSelection.Factory(15000, 25000, 25000, 0.7f)
-                )
-                ExoPlayer.Builder(context, renderersFactory)
-                    .setLoadControl(loadControl)
-                    .setBandwidthMeter(bandwidthMeter)
-                    .setTrackSelector(trackSelector)
-                    .build().apply {
-                    val activeSub = resolved.subtitles.firstOrNull { it.lang == "id" }
-                        ?: resolved.subtitles.firstOrNull()
-
-                    val finalMediaSource = MediaSourceHelper.buildMediaSource(context, resolved.hlsMasterUrl, activeSub, httpDataSourceFactory)
-                    setMediaSource(finalMediaSource)
-
-                    trackSelectionParameters = trackSelectionParameters.buildUpon()
-                        .setPreferredTextLanguage("id")
-                        .setSelectUndeterminedTextLanguage(true)
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                        // Floor kills the sub-SD mush rung; user quality caps still win above.
-                        .setMinVideoBitrate(800_000)
-                        .apply {
-                            loadAudioLanguage(context)?.let { setPreferredAudioLanguage(it) }
-                        }
-                        .build()
-
-                    // Restore the persisted quality cap live (no player recreation).
-                    applyPlaybackQuality(this, loadPlaybackQuality(context))
-
-                    // Restore the persisted playback speed (no rebuffer).
-                    applyPlaybackSpeed(this, loadPlaybackSpeed(context))
-
-                    // 24p films on 60 Hz panels: seamless refresh switch kills judder.
-                    setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS)
-                    // Loudness normalizer: registers the session listener now so
-                    // the effect binds as soon as the audio session appears.
-                    audioStabilizer.attach(this, loadAudioStabilizer(context))
-                    // Stage-1 PCM normalizer takes the same shared toggle.
-                    loudnessNormalizer.setEnabled(loadAudioStabilizer(context))
-                    prepare()
-                    if (uiState.initialPositionMs > 0) {
-                        seekTo(uiState.initialPositionMs)
-                    }
-                    playWhenReady = true
-                }
-            }
+            // The concrete player lives in PlaybackService; the screen
+            // holds only the connected controller (a Player). Custom HLS +
+            // subtitle source assembly runs in-process on the service player.
+            val controllerReady = controller
 
             fun applySubtitleTrack(track: com.idlix.data.model.SubtitleTrack?) {
-                val currentPos = exoPlayer.currentPosition
-                val wasPlaying = exoPlayer.isPlaying
-                val newSource = MediaSourceHelper.buildMediaSource(context, resolved.hlsMasterUrl, track, httpDataSourceFactory)
-                exoPlayer.setMediaSource(newSource, currentPos)
-                val selector = exoPlayer.trackSelectionParameters.buildUpon()
-                if (track != null) {
-                    selector
-                        .setPreferredTextLanguage(track.lang)
-                        .setSelectUndeterminedTextLanguage(true)
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                } else {
-                    selector.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                }
-                exoPlayer.trackSelectionParameters = selector.build()
-                if (wasPlaying) {
-                    exoPlayer.play()
-                }
+                sessionManager.rebuildSubtitleSource(resolved.hlsMasterUrl, track)
             }
 
-            LaunchedEffect(exoPlayer) {
-                activePlayer = exoPlayer
+            // Prepare once per resolved stream when the controller is ready.
+            // Keyed on the resolved instance: Retry re-emits a fresh instance.
+            LaunchedEffect(resolved, controllerReady) {
+                if (controllerReady == null) return@LaunchedEffect
+                sessionManager.prepareStream(
+                    masterUrl = resolved.hlsMasterUrl,
+                    subtitle = uiState.selectedSubtitle,
+                    startPositionMs = uiState.initialPositionMs,
+                    quality = selectedQuality,
+                    speed = selectedSpeed,
+                    audioLanguage = selectedAudioLang,
+                    stabilizerEnabled = stabilizerEnabled,
+                )
             }
 
-            // Sync playback position & throttle save progress to avoid disk I/O lag
-            LaunchedEffect(exoPlayer) {
+
+            // Poll state from the controller (Player interface) and throttle
+            // progress saves to avoid disk I/O lag.
+            LaunchedEffect(controllerReady) {
+                val c = controllerReady ?: return@LaunchedEffect
                 var lastSavedPos = 0L
                 while (true) {
-                    currentPos = exoPlayer.currentPosition
-                    duration = exoPlayer.duration.coerceAtLeast(0L)
-                    bufferedPos = exoPlayer.bufferedPosition
-                    isPlaying = exoPlayer.isPlaying
+                    currentPos = c.currentPosition
+                    duration = c.duration.coerceAtLeast(0L)
+                    bufferedPos = c.bufferedPosition
+                    isPlaying = c.isPlaying
                     if (Math.abs(currentPos - lastSavedPos) >= 5000L && duration > 0) {
                         viewModel.saveProgress(currentPos, duration)
                         lastSavedPos = currentPos
@@ -686,7 +633,7 @@ fun PlayerScreen(
                 }
             }
 
-            DisposableEffect(exoPlayer) {
+            DisposableEffect(controllerReady) {
                 val playerListener = object : Player.Listener {
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_ENDED) {
@@ -699,6 +646,14 @@ fun PlayerScreen(
                     override fun onVideoSizeChanged(videoSize: VideoSize) {
                         videoW = videoSize.width
                         videoH = videoSize.height
+                    }
+
+                    // Feed the screen-level overlay directly: Player callbacks
+                    // arrive on the main thread, so setCues is safe here.
+                    override fun onCues(cueGroup: CueGroup) {
+                        try {
+                            screenSubsRef.value?.setCues(cueGroup.cues)
+                        } catch (_: Exception) {}
                     }
 
                     override fun onTracksChanged(tracks: Tracks) {
@@ -723,54 +678,30 @@ fun PlayerScreen(
                         } catch (_: Exception) {}
                     }
                 }
-                exoPlayer.addListener(playerListener)
+                val c = controllerReady ?: return@DisposableEffect onDispose {}
+                c.addListener(playerListener)
 
                 onDispose {
                     try {
-                        exoPlayer.removeListener(playerListener)
-                        val finalPos = exoPlayer.currentPosition
-                        val finalDur = exoPlayer.duration
+                        val finalPos = c.currentPosition
+                        val finalDur = c.duration
                         if (finalDur > 0) {
                             viewModel.saveProgress(finalPos, finalDur)
                         }
                     } catch (_: Exception) {}
-                    activePlayer = null
-                    audioStabilizer.detach(exoPlayer)
-                    exoPlayer.release()
+                    try {
+                        c.removeListener(playerListener)
+                    } catch (_: Exception) {}
+                    // Service owns the player: no stabilizer detach, no release.
                 }
             }
 
-            // Video Surface with high-visibility Netflix-style subtitles
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        player = exoPlayer
-                        useController = false
-                        // Saved aspect applies at build; FIT default never crops.
-                        applyVideoZoom(this, zoomState.value)
-                        subtitleView?.let { subs ->
-                            subs.setApplyEmbeddedStyles(false)
-                            subs.setStyle(
-                                CaptionStyleCompat(
-                                    Color.WHITE,
-                                    Color.TRANSPARENT,
-                                    Color.TRANSPARENT,
-                                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                                    Color.BLACK,
-                                    null
-                                )
-                            )
-                            subs.setFractionalTextSize(0.053f) // Standard Netflix TV subtitle proportion
-                            subs.setBottomPaddingFraction(SubtitleBottomFraction)
-                        }
-                    }
-                },
-                // Live aspect switch (modal row): padding refreshes on every
-                // update so zoom/FIT changes apply even when resizeMode matches.
-                update = { view ->
-                    applyVideoZoom(view, isZoom)
-                },
+            // Video surface + screen-level caption overlay (the overlay fills
+            // the screen, so captions always follow the screen with
+            // fixed-fraction padding, never the movie frame).
+            PlayerSurfaceHost(
+                player = controllerReady,
+                subtitleViewRef = screenSubsRef,
             )
 
             // D-Pad Player Controls
@@ -784,29 +715,34 @@ fun PlayerScreen(
                 selectedSubtitleLabel = uiState.selectedSubtitle?.label,
                 playButtonModifier = Modifier.focusRequester(playButtonFocusRequester),
                 onPlayPauseClick = {
-                    if (exoPlayer.isPlaying) {
-                        exoPlayer.pause()
-                    } else {
-                        exoPlayer.play()
+                    val c = controllerReady
+                    if (c != null) {
+                        if (c.isPlaying) c.pause() else c.play()
                     }
                     showControls = true
                     userInteractionCount++
                 },
                 onSeekBackward = {
-                    exoPlayer.seekTo((exoPlayer.currentPosition - 10000L).coerceAtLeast(0L))
+                    controllerReady?.let { c ->
+                        c.seekTo((c.currentPosition - 10000L).coerceAtLeast(0L))
+                    }
                     showControls = true
                     userInteractionCount++
                 },
                 onSeekForward = {
                     // duration is TIME_UNSET (< 0) before the first frame;
                     // same guard as the D-pad/gamepad seek branches above.
-                    val dur = exoPlayer.duration.takeIf { it > 0L } ?: Long.MAX_VALUE
-                    exoPlayer.seekTo((exoPlayer.currentPosition + 10000L).coerceAtMost(dur))
+                    controllerReady?.let { c ->
+                        val dur = c.duration.takeIf { it > 0L } ?: Long.MAX_VALUE
+                        c.seekTo((c.currentPosition + 10000L).coerceAtMost(dur))
+                    }
                     showControls = true
                     userInteractionCount++
                 },
                 onSeekTo = { targetMs ->
-                    exoPlayer.seekTo(targetMs.coerceIn(0L, exoPlayer.duration.takeIf { it > 0L } ?: Long.MAX_VALUE))
+                    controllerReady?.let { c ->
+                        c.seekTo(targetMs.coerceIn(0L, c.duration.takeIf { it > 0L } ?: Long.MAX_VALUE))
+                    }
                     showControls = true
                     userInteractionCount++
                 },
@@ -819,16 +755,18 @@ fun PlayerScreen(
                 onToggleSubtitle = {
                     val willBeEnabled = !uiState.isSubtitleEnabled
                     viewModel.toggleSubtitle()
-                    val trackSelector = exoPlayer.trackSelectionParameters.buildUpon()
-                    if (willBeEnabled) {
-                        trackSelector
-                            .setPreferredTextLanguage(uiState.selectedSubtitle?.lang ?: "id")
-                            .setSelectUndeterminedTextLanguage(true)
-                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                    } else {
-                        trackSelector.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    controllerReady?.let { c ->
+                        val trackSelector = c.trackSelectionParameters.buildUpon()
+                        if (willBeEnabled) {
+                            trackSelector
+                                .setPreferredTextLanguage(uiState.selectedSubtitle?.lang ?: "id")
+                                .setSelectUndeterminedTextLanguage(true)
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        } else {
+                            trackSelector.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        }
+                        c.trackSelectionParameters = trackSelector.build()
                     }
-                    exoPlayer.trackSelectionParameters = trackSelector.build()
                     showControls = true
                     userInteractionCount++
                 },
@@ -901,11 +839,12 @@ fun PlayerScreen(
                 availableAudioTracks = availableAudioTracks,
                 selectedAudioLanguage = selectedAudioLang,
                 onSelectAudio = { language ->
-                    selectedAudioLang = language
-                    saveAudioLanguage(context, language)
-                    val selector = exoPlayer.trackSelectionParameters.buildUpon()
-                        .setPreferredAudioLanguage(language)
-                    exoPlayer.trackSelectionParameters = selector.build()
+                    viewModel.setAudioLanguage(language)
+                    controllerReady?.let { c ->
+                        c.trackSelectionParameters = c.trackSelectionParameters.buildUpon()
+                            .setPreferredAudioLanguage(language)
+                            .build()
+                    }
                     userInteractionCount++
                 }
             )
@@ -914,12 +853,10 @@ fun PlayerScreen(
                 isVisible = isQualityPickerVisible,
                 currentQuality = selectedQuality,
                 availableHeights = availableHeights,
-                isZoom = isZoom,
                 onSelectQuality = { quality ->
-                    selectedQuality = quality
-                    savePlaybackQuality(context, quality)
+                    viewModel.setQuality(quality)
                     try {
-                        applyPlaybackQuality(exoPlayer, quality)
+                        controllerReady?.let { applyPlaybackQuality(it, quality) }
                     } catch (_: Exception) {}
                     // Brief beat so the checkmark on the selected row is
                     // visible before the modal vanishes (D-pad confirmation).
@@ -927,13 +864,6 @@ fun PlayerScreen(
                         delay(350)
                         closeQualityPicker()
                     }
-                },
-                // Aspect toggle stays in the modal (D-pad can flip back);
-                // the AndroidView update block applies it live.
-                onSelectAspect = { zoom ->
-                    isZoom = zoom
-                    saveVideoZoom(context, zoom)
-                    userInteractionCount++
                 },
                 onDismiss = {
                     closeQualityPicker()
@@ -944,10 +874,9 @@ fun PlayerScreen(
                 isVisible = isSpeedPickerVisible,
                 currentSpeed = selectedSpeed,
                 onSelectSpeed = { speed ->
-                    selectedSpeed = speed
-                    savePlaybackSpeed(context, speed)
+                    viewModel.setSpeed(speed)
                     try {
-                        applyPlaybackSpeed(exoPlayer, speed)
+                        controllerReady?.let { applyPlaybackSpeed(it, speed) }
                     } catch (_: Exception) {}
                     // Brief beat so the checkmark on the selected row is
                     // visible before the modal vanishes (D-pad confirmation).

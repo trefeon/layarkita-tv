@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,7 +74,7 @@ enum class TopBarTab(val labelRes: Int, val route: String) {
     }
 }
 
-private val TabShape = RoundedCornerShape(4.dp)
+private val TabShape = RoundedCornerShape(20.dp)
 
 /**
  * Netflix-style top bar (~64dp, transparent over hero art with a top
@@ -90,10 +91,9 @@ private val TabShape = RoundedCornerShape(4.dp)
  * and UP from the first content rail returns to the bar via normal
  * focus order (bar floats above the NavHost in the shell Box).
  */
-/** Shared chrome height (64dp): hero bleeds under floating bar while text
+/** Shared chrome height (64dp): hero bleeds under the floating bar while text
  *  screens and the AppNavigation shell use [TvTopBarHeight] as their top
- *  inset (and topEdgeBarEscape threshold) so focused content never traps
- *  under the bar. */
+ *  inset so focused content never traps under the bar. */
 val TvTopBarHeight = 64.dp
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -110,9 +110,9 @@ fun TvTopBar(
     // content, so the link is explicit: key-handler first (deterministic),
     // focusProperties as backup for non-key paths.
     downFocusRequester: FocusRequester? = null,
-    // Selected-tab link: content scrolled under the bar escapes UP to this
-    // requester (see topEdgeBarEscape). Attached only to the selected tab /
-    // gear — one node at a time, so the shared instance stays unambiguous.
+    // Selected-tab link: first-column UP from content escapes to this
+    // requester. Attached only to the selected tab / gear — one node at a
+    // time, so the shared instance stays unambiguous.
     tabFocusLink: FocusRequester? = null
 ) {
     // Transparent over hero art (web-style): legibility comes from the top
@@ -121,8 +121,8 @@ fun TvTopBar(
         modifier = modifier.background(
             Brush.verticalGradient(
                 listOf(
-                    NetflixBlack.copy(alpha = 0.7f),
-                    NetflixBlack.copy(alpha = 0.15f),
+                    NetflixBlack.copy(alpha = 0.82f),
+                    NetflixBlack.copy(alpha = 0.35f),
                     Color.Transparent
                 )
             )
@@ -130,6 +130,10 @@ fun TvTopBar(
     ) {
         // 5%-or-32dp-min side rule: 24dp sat inside the overscan danger zone.
         val sidePadding = tvContentSidePadding()
+        val tabs = TopBarTab.values()
+        val tabRequesters = remember { List(tabs.size) { FocusRequester() } }
+        val gearRequester = remember { FocusRequester() }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -154,16 +158,21 @@ fun TvTopBar(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val tabs = TopBarTab.values()
                 for ((index, tab) in tabs.withIndex()) {
+                    val isFirst = index == 0
+                    val isLast = index == tabs.lastIndex
+                    val leftRequester = if (isFirst) FocusRequester.Cancel else tabRequesters[index - 1]
+                    val rightRequester = if (isLast) gearRequester else tabRequesters[index + 1]
+
                     TopBarTabItem(
                         tab = tab,
                         selected = tab == selectedTab,
                         onClick = { onTabSelected(tab) },
+                        focusRequester = tabRequesters[index],
+                        leftRequester = leftRequester,
+                        rightRequester = rightRequester,
                         downFocusRequester = downFocusRequester,
-                        tabFocusLink = if (tab == selectedTab) tabFocusLink else null,
-                        isFirst = index == 0,
-                        isLast = index == tabs.lastIndex
+                        tabFocusLink = if (tab == selectedTab) tabFocusLink else null
                     )
                 }
             }
@@ -173,6 +182,8 @@ fun TvTopBar(
             SettingsGear(
                 selected = settingsSelected,
                 onClick = onSettingsClick,
+                focusRequester = gearRequester,
+                leftRequester = tabRequesters.lastOrNull() ?: FocusRequester.Cancel,
                 downFocusRequester = downFocusRequester,
                 tabFocusLink = if (settingsSelected) tabFocusLink else null
             )
@@ -186,34 +197,53 @@ private fun TopBarTabItem(
     tab: TopBarTab,
     selected: Boolean,
     onClick: () -> Unit,
+    focusRequester: FocusRequester,
+    leftRequester: FocusRequester,
+    rightRequester: FocusRequester,
     downFocusRequester: FocusRequester? = null,
-    tabFocusLink: FocusRequester? = null,
-    isFirst: Boolean = false,
-    isLast: Boolean = false
+    tabFocusLink: FocusRequester? = null
 ) {
     val tabInteraction = remember { MutableInteractionSource() }
     val focused by tabInteraction.collectIsFocusedAsState()
-    val textColor = if (selected || focused) NetflixWhite else NetflixLightGray
+    val hovered by tabInteraction.collectIsHoveredAsState()
+    val isActive = focused || hovered
+    val textColor = if (selected || isActive) NetflixWhite else NetflixLightGray
 
-    Column(
+    val pillModifier = when {
+        isActive -> Modifier
+            .background(NetflixWhite.copy(alpha = 0.16f), TabShape)
+            .border(2.dp, NetflixWhite, TabShape)
+        selected -> Modifier
+            .background(NetflixRed.copy(alpha = 0.18f), TabShape)
+            .border(1.dp, NetflixRed.copy(alpha = 0.7f), TabShape)
+        else -> Modifier
+    }
+
+    Box(
         modifier = Modifier
-            .border(
-                width = 2.dp,
-                color = if (focused) NetflixWhite else Color.Transparent,
-                shape = TabShape
-            )
+            .then(pillModifier)
             .clickable(
                 interactionSource = tabInteraction,
                 indication = null,
-                onClick = onClick
+                onClick = {
+                    // Action first (usually a route switch — the bar itself
+                    // survives, so this node stays composed), then park
+                    // D-pad focus here so arrows continue from this tab.
+                    // Hover never parks: it only drives the pill highlight.
+                    onClick()
+                    try {
+                        focusRequester.requestFocus()
+                    } catch (_: Exception) {
+                    }
+                }
             )
+            .focusRequester(focusRequester)
             .then(if (tabFocusLink != null) Modifier.focusRequester(tabFocusLink) else Modifier)
             .focusProperties {
-                if (downFocusRequester != null) down = downFocusRequester
-                // Col-0 LEFT stays: HOME has no left neighbor in the fixed
-                // strip, so geometry would die. Last tab RIGHT goes to the
-                // gear via geometry (same Row, always composed) — no Cancel.
-                if (isFirst) left = FocusRequester.Cancel
+                up = FocusRequester.Cancel
+                down = downFocusRequester ?: FocusRequester.Default
+                left = leftRequester
+                right = rightRequester
             }
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
@@ -228,23 +258,14 @@ private fun TopBarTabItem(
                     false
                 }
             }
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             text = stringResource(tab.labelRes),
             color = textColor,
-            fontSize = 15.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-        )
-        // Selected underline — red 2dp; transparent spacer otherwise so
-        // rows never shift when selection moves.
-        Box(
-            modifier = Modifier
-                .padding(top = 4.dp)
-                .width(24.dp)
-                .height(2.dp)
-                .background(if (selected) NetflixRed else Color.Transparent)
+            fontSize = 14.sp,
+            fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium
         )
     }
 }
@@ -254,29 +275,43 @@ private fun TopBarTabItem(
 private fun SettingsGear(
     selected: Boolean,
     onClick: () -> Unit,
+    focusRequester: FocusRequester,
+    leftRequester: FocusRequester,
     downFocusRequester: FocusRequester? = null,
     tabFocusLink: FocusRequester? = null
 ) {
     val gearInteraction = remember { MutableInteractionSource() }
     val focused by gearInteraction.collectIsFocusedAsState()
-    val tint = if (selected || focused) NetflixWhite else NetflixLightGray
+    val hovered by gearInteraction.collectIsHoveredAsState()
+    val isActive = focused || hovered
+    val tint = if (selected || isActive) NetflixWhite else NetflixLightGray
 
     Box(
         modifier = Modifier
             .border(
                 width = 2.dp,
-                color = if (focused) NetflixWhite else Color.Transparent,
+                color = if (isActive) NetflixWhite else Color.Transparent,
                 shape = TabShape
             )
             .clickable(
                 interactionSource = gearInteraction,
                 indication = null,
-                onClick = onClick
+                onClick = {
+                    // Same mixed-input contract as the tabs: action first,
+                    // then park D-pad focus on the gear. Hover never parks.
+                    onClick()
+                    try {
+                        focusRequester.requestFocus()
+                    } catch (_: Exception) {
+                    }
+                }
             )
+            .focusRequester(focusRequester)
             .then(if (tabFocusLink != null) Modifier.focusRequester(tabFocusLink) else Modifier)
             .focusProperties {
-                if (downFocusRequester != null) down = downFocusRequester
-                // Terminal RIGHT stays: gear is the last node in the bar.
+                up = FocusRequester.Cancel
+                down = downFocusRequester ?: FocusRequester.Default
+                left = leftRequester
                 right = FocusRequester.Cancel
             }
             .onPreviewKeyEvent { event ->

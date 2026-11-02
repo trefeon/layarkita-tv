@@ -2,12 +2,12 @@ package com.idlix.tv.ui.components
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.relocation.BringIntoViewResponder
+import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -15,20 +15,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
+import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.launch
 
 /**
@@ -45,19 +48,61 @@ object TvSizing {
     /** Minimum side inset that survives overscan on any panel. */
     val MinSideInset: Dp = 32.dp
 
-    /** Rail inset: keeps 1.12x focus-zoom headroom at rail ends. */
+    /** Rail inset: keeps focus-zoom headroom at rail ends. */
     val RailInset: Dp = 48.dp
 
-    /**
-     * Focus-frame headroom around rail cards: [railFocusFrame] applies
-     * [RailFocusHorizontal] itself; call sites add
-     * `padding(vertical = RailFocusVertical)` outside it. Worst case is the
-     * 220dp-wide continue card at 1.12x (13.2dp overflow per side) plus the
-     * 2dp ring, so 16dp keeps the full ring visible with breathing room on
-     * every rail, at start/middle/end.
-     */
-    val RailFocusHorizontal: Dp = 16.dp
-    val RailFocusVertical: Dp = 16.dp
+    /** Focus-frame headroom around rail cards. */
+    val RailFocusHorizontal: Dp = 12.dp
+    val RailFocusVertical: Dp = 12.dp
+    const val CardFocusScale: Float = 1.06f
+}
+
+fun tvGridColumnCount(
+    screenWidthDp: Int,
+    minCellWidthDp: Int,
+    horizontalPaddingDp: Int = 96,
+    contentInsetDp: Int = 24,
+    spacingDp: Int = 16
+): Int {
+    val safeMin = minCellWidthDp.coerceAtLeast(1)
+    val gridW = (screenWidthDp - horizontalPaddingDp - contentInsetDp).coerceAtLeast(safeMin)
+    return ((gridW + spacingDp) / (safeMin + spacingDp)).coerceAtLeast(1)
+}
+
+data class TvMatrixNeighbors(
+    val leftIndex: Int?,
+    val rightIndex: Int?,
+    val upIndex: Int?,
+    val downIndex: Int?,
+    val isFirstRow: Boolean,
+    val isLastRow: Boolean,
+    val isFirstCol: Boolean,
+    val isLastCol: Boolean
+)
+
+fun tvMatrixNeighbors(index: Int, size: Int, cols: Int): TvMatrixNeighbors {
+    val safeCols = cols.coerceAtLeast(1)
+    val row = index / safeCols
+    val col = index % safeCols
+    val lastRowStart = if (size <= 0) 0 else ((size - 1) / safeCols) * safeCols
+    val isFirstRow = row == 0
+    val isLastRow = index >= lastRowStart
+    val isFirstCol = col == 0
+    val isLastCol = col == safeCols - 1 || index >= size - 1
+    val leftIndex = if (isFirstCol) null else index - 1
+    val rightIndex = if (isLastCol) null else index + 1
+    val upIndex = if (isFirstRow) null else index - safeCols
+    val downIndex = if (isLastRow || size <= 0) null else (index + safeCols).coerceAtMost(size - 1)
+    return TvMatrixNeighbors(
+        leftIndex = leftIndex,
+        rightIndex = rightIndex,
+        upIndex = upIndex,
+        downIndex = downIndex,
+        isFirstRow = isFirstRow,
+        isLastRow = isLastRow,
+        isFirstCol = isFirstCol,
+        isLastCol = isLastCol
+    )
 }
 
 /**
@@ -83,42 +128,37 @@ fun tvDetailHeaderHeight(): Dp {
     return (screenH * 0.78f).coerceIn(300.dp, 420.dp)
 }
 
-/**
- * Focus frame for rail cards (swimlane / Top-10 / continue / search grid /
- * detail episodes): a [BringIntoViewRequester] on the WRAPPER bounds, which
- * include [TvSizing.RailFocusHorizontal] of headroom on each side plus
- * call-site `padding(vertical = TvSizing.RailFocusVertical)` for the 1.12x
- * focus zoom (worst case 220dp continue card -> 13.2dp overflow per side,
- * plus the 2dp ring).
- *
- * The platform's automatic focus bring-into-view uses the CARD's own layout
- * bounds and ignores the zoom overflow, so an edge arrival that settles the
- * card exactly on the scroll-viewport edge slices the white ring. The
- * explicit request below fires after the automatic one and settles with the
- * padded wrapper fully visible, so the ring + zoom survive on all sides.
- * Apply OUTSIDE the card, e.g.:
- * `Box(Modifier.railFocusFrame().padding(vertical = TvSizing.RailFocusVertical)) { TvMovieCard(...) }`
- *
- * Inter-card spacing lives in this headroom (16dp per side = 32dp gaps), so
- * cards themselves carry no end padding — otherwise gaps double up.
- */
 @OptIn(ExperimentalFoundationApi::class)
-fun Modifier.railFocusFrame(): Modifier = composed {
-    val frameRequester = remember { BringIntoViewRequester() }
-    val frameScope = rememberCoroutineScope()
-    bringIntoViewRequester(frameRequester)
-        .padding(horizontal = TvSizing.RailFocusHorizontal)
-        .onFocusChanged {
-            // NB: hasFocus, not isFocused — the wrapper Box itself is never
-            // focusable, so isFocused stays false here and the explicit
-            // request below would silently never run. With hasFocus the
-            // wrapper settles fully into view whenever its card takes focus,
-            // which is what keeps edge rings (first/last card) unclipped.
-            if (it.hasFocus) {
-                frameScope.launch { frameRequester.bringIntoView() }
+fun Modifier.tvFocusFrame(
+    horizontalPadding: Dp = 0.dp,
+    verticalPadding: Dp = 0.dp
+): Modifier = composed {
+    var myRect by remember { mutableStateOf(Rect.Zero) }
+    val responder = remember {
+        object : BringIntoViewResponder {
+            @ExperimentalFoundationApi
+            override fun calculateRectForParent(localRect: Rect): Rect {
+                return if (myRect != Rect.Zero) myRect else localRect
+            }
+
+            @ExperimentalFoundationApi
+            override suspend fun bringChildIntoView(localRect: () -> Rect?) {
             }
         }
+    }
+    this
+        .onSizeChanged { myRect = Rect(Offset.Zero, it.toSize()) }
+        .bringIntoViewResponder(responder)
+        .padding(horizontal = horizontalPadding, vertical = verticalPadding)
 }
+
+fun Modifier.railFocusFrame(): Modifier =
+    tvFocusFrame(horizontalPadding = TvSizing.RailFocusHorizontal, verticalPadding = 0.dp)
+
+fun Modifier.tvGridFocusFrame(
+    horizontalPadding: Dp = 0.dp,
+    verticalPadding: Dp = 10.dp
+): Modifier = tvFocusFrame(horizontalPadding = horizontalPadding, verticalPadding = verticalPadding)
 
 /**
  * Top-edge bar escape for scrollable TV content under the floating bar.
@@ -153,8 +193,13 @@ fun Modifier.topEdgeBarEscape(
     val edgePx = with(LocalDensity.current) { (TvTopBarHeight + 12.dp).toPx() }
     val focusManager = LocalFocusManager.current
     val escapeScope = rememberCoroutineScope()
+    val positionModifier = if (!force) {
+        Modifier.onGloballyPositioned { topPx = it.positionInWindow().y }
+    } else {
+        Modifier
+    }
     this
-        .onGloballyPositioned { topPx = it.positionInWindow().y }
+        .then(positionModifier)
         .onPreviewKeyEvent { event ->
             if (event.type != KeyEventType.KeyDown || event.key != Key.DirectionUp) {
                 return@onPreviewKeyEvent false
@@ -190,203 +235,6 @@ fun Modifier.topEdgeBarEscape(
 }
 
 /**
- * Disposal-proof rail hop for scrollable TV rail lists (DISPOSE-1).
- *
- * Rail UP/DOWN links live on each rail's LazyRow container (stable only
- * while that column item is composed). On a scrolled LazyColumn the target
- * rail is usually disposed, so the declarative `focusProperties` link
- * silently no-ops and focus sticks on the current card (rig: 8x DOWN from
- * hero never leaves Continue).
- *
- * This modifier sits AFTER [topEdgeBarEscape] (escape wins while a card sits
- * under the bar) and AFTER [columnHopKeys]: whenever a column target is
- * valid, the column hop consumes UP/DOWN first, so this container-restorer
- * path can never fire for a column hop — it only serves legacy null-column
- * rails. When the target rail index is already composed (in the viewport,
- * even partially) it returns false so the declarative link wins untouched —
- * no scroll jump, and the container's focusRestorer keeps the current
- * column. Only when the target item is NOT composed does it consume the key,
- * scroll the outer list to the target rail, wait one settle beat, then
- * request the rail container link (restorer routes to that rail's
- * last-focused card — never col-0).
- *
- * [upRailIndex]/[downRailIndex] are outer-[LazyListState] item indices
- * mirroring the owning screen's column order (hero/header = 0); -1 disables
- * that direction (last rail DOWN, or a null link). Null [outerListState]
- * disables the hop entirely, preserving legacy behavior for non-lazy owners.
- */
-fun Modifier.railHopKeys(
-    outerListState: LazyListState?,
-    upLink: FocusRequester?,
-    upRailIndex: Int,
-    downLink: FocusRequester?,
-    downRailIndex: Int
-): Modifier = composed {
-    if (outerListState == null) return@composed this
-    val hopScope = rememberCoroutineScope()
-    this.onPreviewKeyEvent { event ->
-        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        val (link, railIndex) = when (event.key) {
-            Key.DirectionUp -> upLink to upRailIndex
-            Key.DirectionDown -> downLink to downRailIndex
-            else -> return@onPreviewKeyEvent false
-        }
-        if (link == null || railIndex < 0) return@onPreviewKeyEvent false
-        val composedTarget = try {
-            outerListState.layoutInfo.visibleItemsInfo.any { it.index == railIndex }
-        } catch (_: Exception) {
-            false
-        }
-        // In-viewport target: declarative focusProperties link wins (no jump).
-        if (composedTarget) return@onPreviewKeyEvent false
-        hopScope.launch {
-            try {
-                outerListState.scrollToItem(railIndex)
-            } catch (_: Exception) {
-                return@launch
-            }
-            delay(120)
-            try {
-                link.requestFocus()
-            } catch (_: Exception) {}
-        }
-        true
-    }
-}
-/**
- * Column-preserving rail target for [columnHopKeys].
- *
- * [cards] is the target rail's column registry (index -> card requester),
- * hoisted by the owning screen and filled by the rail itself. [fallbackLink]
- * is RETAINED ONLY for call-site shape (owning screens still pass the rail
- * container link) and is NEVER focused by the UP/DOWN path: the container
- * restorer replays the target rail's last-touched card, so touching it here
- * is the col-0 -> far-right jump. It stays attached on the rail LazyRow
- * container solely for the detail-return match-effect path. [itemCount]
- * clamps the source column into range so a short target lands on its last
- * card. [railIndex] is the outer [LazyListState] item index of the target
- * rail; -1 disables the direction.
- */
-data class RailColumnTarget(
-    val listState: LazyListState? = null,
-    val cards: Map<Int, FocusRequester>? = null,
-    val fallbackLink: FocusRequester? = null,
-    val itemCount: Int = 0,
-    val railIndex: Int = -1
-)
-
-/**
- * Column-preserving UP/DOWN hop for TV rails.
- *
- * Container links + focusRestorer restore the LAST-focused card, so a rail
- * touched far-right replays far-right on every later UP/DOWN (rig: Action
- * col-0 UP lands on Series far-right). This modifier sits AFTER
- * [topEdgeBarEscape] (escape wins while a card sits under the bar) and BEFORE
- * [railHopKeys], and it CONSUMES DPAD UP/DOWN on every card whenever the
- * target is valid — so the container-restorer path below can never fire for
- * a column hop. It clamps the source column into the target rail
- * (`sourceIndex.coerceAtMost(itemCount - 1)`), scrolls the outer list to the
- * target rail plus the target rail to that column, then focuses the
- * same-column card directly. Null target (e.g. hero UP) or an invalid target
- * (railIndex < 0, itemCount <= 0) returns false so the legacy declarative
- * link wins untouched.
- *
- * No container fallback: when the same-column card requester is missing,
- * the hop re-asserts both scrolls and retries (bounded: 1x120ms settle plus
- * up to 3x200ms) until the freshly composed card registers. A final miss
- * consumes the key and stays — focus never touches the container link, so a
- * col-0 source can never land far-right and a far-right source never wraps
- * to col-0.
- *
- * Stale-registry settle: the card registry holds the requester from the
- * target card's last composition. When the target rail was last left
- * scrolled sideways (e.g. Top-10 visited far-right), the same-column card
- * is disposed, so the first read after scrolling can still return the
- * detached requester (silent no-op) or miss. While the post-beat read is
- * unchanged from the pre-scroll snapshot, the target hasn't recomposed yet
- * — re-assert both scrolls and settle again, so the freshly composed card
- * wins. Focusing a leftover detached instance is a silent no-op (stay),
- * never a jump.
- */
-fun Modifier.columnHopKeys(
-    outerListState: LazyListState?,
-    sourceIndex: Int,
-    upTarget: RailColumnTarget?,
-    downTarget: RailColumnTarget?
-): Modifier = composed {
-    if (outerListState == null) return@composed this
-    if (upTarget == null && downTarget == null) return@composed this
-    val hopScope = rememberCoroutineScope()
-    this.onPreviewKeyEvent { event ->
-        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        val target = when (event.key) {
-            Key.DirectionUp -> upTarget
-            Key.DirectionDown -> downTarget
-            else -> return@onPreviewKeyEvent false
-        } ?: return@onPreviewKeyEvent false
-        if (target.railIndex < 0 || target.itemCount <= 0) return@onPreviewKeyEvent false
-        val targetIndex = sourceIndex.coerceIn(0, target.itemCount - 1)
-        hopScope.launch {
-            val before = try {
-                target.cards?.get(targetIndex)
-            } catch (_: Exception) {
-                null
-            }
-            try {
-                outerListState.scrollToItem(target.railIndex)
-            } catch (_: Exception) {}
-            try {
-                target.listState?.scrollToItem(targetIndex)
-            } catch (_: Exception) {}
-            delay(120)
-            var card = try {
-                target.cards?.get(targetIndex)
-            } catch (_: Exception) {
-                null
-            }
-            // Bounded scroll-then-retry: while the registry hasn't turned
-            // over (stale detached instance or still missing), the target
-            // card hasn't recomposed yet — re-assert both scrolls and settle
-            // again, up to 3 extra 200ms beats. The container link is never
-            // touched here (restorer would replay far-right). A visibly
-            // composed same-instance is live, so it breaks out and focuses
-            // immediately with no extra beats.
-            var attempts = 0
-            while ((card == null || card === before) && attempts < 3) {
-                val live = try {
-                    card != null &&
-                        outerListState.layoutInfo.visibleItemsInfo.any { it.index == target.railIndex } &&
-                        (target.listState?.layoutInfo?.visibleItemsInfo?.any { it.index == targetIndex } == true)
-                } catch (_: Exception) {
-                    false
-                }
-                if (live) break
-                try {
-                    outerListState.scrollToItem(target.railIndex)
-                } catch (_: Exception) {}
-                try {
-                    target.listState?.scrollToItem(targetIndex)
-                } catch (_: Exception) {}
-                delay(200)
-                card = try {
-                    target.cards?.get(targetIndex)
-                } catch (_: Exception) {
-                    null
-                }
-                attempts++
-            }
-            // Same-column card only; a final miss (or a leftover detached
-            // instance, whose request is a silent no-op) stays put — the key
-            // is already consumed, so railHopKeys/restorer can never fire.
-            try {
-                if (card != null) card.requestFocus()
-            } catch (_: Exception) {}
-        }
-        true
-    }
-}
-
-/**
  * Absolute-control edge trap: explicitly Cancel the given D-pad directions so
  * geometry can never move focus off a terminal edge (col-0 LEFT, last-cell
  * RIGHT, last-row DOWN, fullscreen UP). Non-cancelled directions keep the
@@ -405,6 +253,41 @@ fun Modifier.edgeCancels(
         if (right) this.right = FocusRequester.Cancel
         if (up) this.up = FocusRequester.Cancel
         if (down) this.down = FocusRequester.Cancel
+    }
+}
+
+/**
+ * D-pad arrow safety net for mixed-input sessions (mouse/keyboard + remote).
+ *
+ * Bubble-phase only: this fires solely for arrow keys that the focused child
+ * did NOT consume — healthy D-pad paths (search moves, Cancel terminals that
+ * hold, rail UP/DOWN preview hops, bar escapes) consume before bubbling, so
+ * they are untouched. When an arrow does bubble up, the focused node (if any)
+ * is a deterministic dead end — typically a link whose target was disposed
+ * by a list change — so focus re-parks on [fallback] (the rail's last-known
+ * card) instead of stranding the user.
+ *
+ * Deliberately narrow: arrows only. Tab/Enter pass through untouched, so
+ * keyboard traversal order is never trapped or reordered by this modifier,
+ * and hover is purely visual (never requests focus). A null [fallback] is a
+ * no-op. A disposed [fallback] throws inside requestFocus and is reported as
+ * unconsumed (false), preserving the pre-existing behavior exactly.
+ */
+fun Modifier.tvDpadFocusRecovery(fallback: FocusRequester?): Modifier = composed {
+    if (fallback == null) return@composed this
+    this.onKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+        when (event.key) {
+            Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight -> {
+                try {
+                    fallback.requestFocus()
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            else -> false
+        }
     }
 }
 
@@ -433,4 +316,22 @@ fun Modifier.dpadBackHandler(onBack: () -> Unit): Modifier = composed {
             false
         }
     }
+}
+
+/**
+ * Upgrades TMDB w342 poster URLs to high-resolution w780 for 1080p/4K TV panels
+ * while preserving non-TMDB or blank URLs untouched.
+ */
+fun String.toFullQualityPosterUrl(): String =
+    if (contains("image.tmdb.org/t/p/w342")) replace("/t/p/w342", "/t/p/w780") else this
+
+/**
+ * Upgrades TMDB backdrop/still URLs to full quality (w1280 -> original, w500/w342 -> w780)
+ * for full-bleed hero billboards and HD cards.
+ */
+fun String.toFullQualityBackdropUrl(): String = when {
+    contains("image.tmdb.org/t/p/w1280") -> replace("/t/p/w1280", "/t/p/original")
+    contains("image.tmdb.org/t/p/w500") -> replace("/t/p/w500", "/t/p/w780")
+    contains("image.tmdb.org/t/p/w342") -> replace("/t/p/w342", "/t/p/w780")
+    else -> this
 }

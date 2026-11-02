@@ -2,11 +2,12 @@ package com.idlix.tv.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,21 +20,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import com.idlix.tv.R
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
@@ -47,6 +54,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.idlix.data.model.WatchHistoryItem
+import com.idlix.tv.R
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixDarkCard
 import com.idlix.tv.ui.theme.NetflixLightGray
@@ -65,37 +73,72 @@ fun TvContinueWatchingCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     width: Int = 220,
-    height: Int = 135
+    height: Int = 135,
+    fillWidth: Boolean = false,
+    onFocus: (() -> Unit)? = null
 ) {
-    var isFocused by remember { mutableStateOf(false) }
+    val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isCardActive = isFocused || isHovered
+
+    // Mixed-input park: same contract as TvMovieCard — click lands D-pad
+    // focus on this node so arrows continue from here. Hover never parks.
+    val clickParkRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isCardActive) {
+        if (isCardActive) {
+            onFocus?.invoke()
+        }
+    }
 
     val context = LocalContext.current
-    val imageUrl = item.backdropUrl ?: item.posterUrl
+    val rawUrl = item.backdropUrl ?: item.posterUrl
+    val imageUrl = remember(rawUrl) { rawUrl?.toFullQualityBackdropUrl() }
     val imageRequest = remember(imageUrl) {
         ImageRequest.Builder(context)
             .data(imageUrl)
-            .size(440, 270)
-            .precision(Precision.INEXACT)
-            .allowRgb565(true)
+            .size(780, 440)
+            .precision(Precision.EXACT)
+            .allowRgb565(false)
             .crossfade(false)
             .build()
     }
 
-    Card(
-        onClick = onClick,
-        modifier = modifier
+    val sizeModifier = if (fillWidth) {
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(width.toFloat() / height.toFloat().coerceAtLeast(1f))
+    } else {
+        Modifier
             .width(width.dp)
             .height(height.dp)
-            .onFocusChanged { isFocused = it.isFocused },
-        scale = CardDefaults.scale(focusedScale = 1.12f),
+    }
+
+    Card(
+        onClick = {
+            // Action first, park second — same contract as TvMovieCard.
+            onClick()
+            try {
+                clickParkRequester.requestFocus()
+            } catch (_: Exception) {
+            }
+        },
+        interactionSource = interactionSource,
+        modifier = modifier
+            .then(sizeModifier)
+            .focusRequester(clickParkRequester),
+        scale = CardDefaults.scale(focusedScale = TvSizing.CardFocusScale),
         glow = CardDefaults.glow(focusedGlow = Glow.None),
         shape = CardDefaults.shape(shape = ContinueCardShape),
         border = CardDefaults.border(
             border = Border(
-                border = BorderStroke(2.dp, Color.Transparent)
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
+                shape = ContinueCardShape
             ),
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NetflixWhite)
+                border = BorderStroke(2.5.dp, NetflixWhite),
+                shape = ContinueCardShape
             )
         )
     ) {
@@ -103,6 +146,16 @@ fun TvContinueWatchingCard(
             modifier = Modifier
                 .fillMaxSize()
                 .background(NetflixDarkCard)
+                .drawWithContent {
+                    drawContent()
+                    if (isCardActive) {
+                        drawRoundRect(
+                            color = Color.Black,
+                            style = Stroke(width = 2.dp.toPx()),
+                            cornerRadius = CornerRadius(10.dp.toPx())
+                        )
+                    }
+                }
         ) {
             // Backdrop Image
             AsyncImage(
@@ -119,23 +172,28 @@ fun TvContinueWatchingCard(
                     .background(ContinueScrimBrush)
             )
 
-            // Center play button overlay on focus
-            if (isFocused) {
-                Box(
+            // Center play button overlay: always composed to eliminate layout churn,
+            // with graphicsLayer alpha and scale toggled on focus.
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .align(Alignment.Center)
+                    .graphicsLayer {
+                        alpha = if (isCardActive) 1f else 0.72f
+                        val s = if (isCardActive) 1.08f else 0.92f
+                        scaleX = s
+                        scaleY = s
+                    }
+                    .background(if (isCardActive) NetflixRed else Color(0xAA000000), CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = stringResource(R.string.play),
+                    tint = NetflixWhite,
                     modifier = Modifier
-                        .size(36.dp)
-                        .background(NetflixRed, CircleShape)
+                        .size(22.dp)
                         .align(Alignment.Center)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = stringResource(R.string.play),
-                        tint = NetflixWhite,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .align(Alignment.Center)
-                    )
-                }
+                )
             }
 
             // Bottom title & progress bar
@@ -143,7 +201,7 @@ fun TvContinueWatchingCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomStart)
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text(
                     text = item.title,
@@ -187,16 +245,6 @@ fun TvContinueWatchingCard(
                             .background(NetflixRed, RoundedCornerShape(1.5.dp))
                     )
                 }
-            }
-
-            // Dark inner edge (pairs with the white focus ring) so the
-            // selection boundary reads on bright backdrops too. B&W only.
-            if (isFocused) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .border(2.dp, Color.Black, ContinueCardShape)
-                )
             }
         }
     }

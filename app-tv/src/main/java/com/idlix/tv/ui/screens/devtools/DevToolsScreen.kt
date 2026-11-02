@@ -2,6 +2,7 @@ package com.idlix.tv.ui.screens.devtools
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,21 +13,31 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.KeyEventType
@@ -51,7 +62,11 @@ import com.idlix.tv.BuildConfig
 import com.idlix.tv.R
 import com.idlix.tv.ui.components.topEdgeBarEscape
 import com.idlix.tv.ui.components.edgeCancels
+import com.idlix.tv.ui.components.TvSizing
 import com.idlix.tv.ui.components.tvContentSidePadding
+import com.idlix.tv.ui.components.tvGridFocusFrame
+import com.idlix.tv.ui.components.tvMatrixNeighbors
+import com.idlix.tv.ui.components.TvMovieCard
 import com.idlix.tv.ui.navigation.Screen
 import com.idlix.tv.ui.screens.settings.SettingsViewModel
 import com.idlix.tv.update.UpdateState
@@ -164,6 +179,8 @@ fun devKeyName(keyCode: Int): String {
         NativeKeyEvent.KEYCODE_BACK, NativeKeyEvent.KEYCODE_ESCAPE -> "BACK"
         NativeKeyEvent.KEYCODE_BUTTON_B -> "BACK(Gamepad-B)"
         NativeKeyEvent.KEYCODE_MENU -> "MENU"
+        NativeKeyEvent.KEYCODE_INFO -> "INFO"
+        NativeKeyEvent.KEYCODE_GUIDE -> "GUIDE"
         NativeKeyEvent.KEYCODE_BUTTON_START -> "MENU(Gamepad-Start)"
         NativeKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> "MEDIA_PLAY_PAUSE"
         NativeKeyEvent.KEYCODE_MEDIA_PLAY -> "MEDIA_PLAY"
@@ -215,7 +232,20 @@ fun DevToolsScreen(
     entryLinkRequester: FocusRequester? = null,
     // Content-to-bar escape for the first action (see topEdgeBarEscape).
     barLinkRequester: FocusRequester? = null,
+    // Detail-style return key, hoisted in AppNavigation like every other
+    // destination (this screen pushes nothing, so the key is normally null;
+    // entry still respects it for contract symmetry).
+    refocusKey: String? = null,
+    onRefocusKeyChange: (String?) -> Unit = {},
+    // Hoisted column scroll (see AppNavigation): this screen disposes on
+    // BACK, so a local state would reset to 0 on re-entry.
+    scrollState: ScrollState = rememberScrollState(),
     onBack: () -> Unit = {},
+    // Dummy-QA navigation (see the fixtures section below): opening a DUMMY
+    // id exercises the real detail/player error states (Retry + Back) with
+    // zero catalog dependence. Defaults no-op for previews/tests.
+    onOpenDummyDetail: (contentType: String, slug: String) -> Unit = { _, _ -> },
+    onOpenDummyPlayer: (contentType: String, contentId: String) -> Unit = { _, _ -> },
 ) {
     val records by DevKeyLog.records.collectAsState()
     val updateState by settingsViewModel.updateState.collectAsState()
@@ -225,13 +255,32 @@ fun DevToolsScreen(
     val carouselCount by DevToolsCarousel.count.collectAsState()
     val carouselObserved by DevToolsCarousel.observed.collectAsState()
 
-    val runUpdateFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
+    // Screen-to-top on genuine content→bar escape (see topEdgeBarEscape).
+    val scrollToTop: suspend () -> Unit = {
         try {
-            kotlinx.coroutines.delay(200)
-            runUpdateFocus.requestFocus()
-        } catch (_: Exception) {
+            scrollState.scrollTo(0)
+        } catch (_: Exception) {}
+    }
+
+    val runUpdateFocus = remember { FocusRequester() }
+    // Park + retry: the nav-transition window drops the first request, so
+    // pull the column to 0 and re-assert (8x40ms) — entry never parks black.
+    // First-entry gated so a settings BACK-loop re-entry still parks cleanly
+    // without yanking focus on every recomposition.
+    var firstEntry by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        if (!firstEntry || refocusKey != null) return@LaunchedEffect
+        firstEntry = false
+        try {
+            scrollState.scrollTo(0)
+        } catch (_: Exception) {}
+        repeat(8) {
+            try {
+                runUpdateFocus.requestFocus()
+            } catch (_: Exception) {}
+            kotlinx.coroutines.delay(40)
         }
+        onRefocusKeyChange(null)
     }
 
     val cfg = LocalConfiguration.current
@@ -246,7 +295,7 @@ fun DevToolsScreen(
         modifier = modifier
             .fillMaxSize()
             .background(com.idlix.tv.ui.theme.NetflixBlack)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             // Root preview recorder: sees keys before children consume them,
             // never consumes (returns false) so focus + BACK keep working.
             .onPreviewKeyEvent { event ->
@@ -302,21 +351,21 @@ fun DevToolsScreen(
                             Modifier
                         }
                     )
-                    .topEdgeBarEscape(barLinkRequester)
+                    .topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop)
             )
             DevButton(
                 focusKey = "$currentRoute/action:force-resolver-refresh",
                 label = stringResource(R.string.dev_action_resolver),
                 icon = Icons.Default.Refresh,
                 onClick = { settingsViewModel.refreshResolverNow() },
-                modifier = Modifier.topEdgeBarEscape(barLinkRequester)
+                modifier = Modifier.topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop)
             )
             DevButton(
                 focusKey = "$currentRoute/action:clear-key-log",
                 label = stringResource(R.string.dev_keylog_clear),
                 icon = Icons.Default.Delete,
                 onClick = { DevKeyLog.clear() },
-                modifier = Modifier.topEdgeBarEscape(barLinkRequester)
+                modifier = Modifier.topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop)
             )
         }
 
@@ -394,13 +443,112 @@ fun DevToolsScreen(
             }
         }
 
+        // ---- UI QA fixtures (DUMMY — no network) ---------------------------
+        // Labeled placeholders only: extreme card content, missing art,
+        // 0.0/blank ratings, quality pills, aspect stills and partial-row
+        // grids. Every tile opens the real DUMMY error route (Retry + Back),
+        // so no dummy is a dead button and nothing hits the catalog.
+        DevSection(
+            icon = Icons.Default.Movie,
+            title = "UI QA fixtures (DUMMY)",
+            desc = "Placeholder art + fake ids only — never real titles. Opens real error states."
+        ) {
+            // Extreme card content: missing poster, 0.0/blank rating, pills.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TvMovieCard(
+                    title = "DUMMY — an extremely long fixture title that must ellipsize across lines without breaking the card",
+                    posterUrl = "",
+                    rating = "0.0",
+                    quality = "WEB-DL",
+                    width = 135,
+                    height = 200,
+                    onClick = { onOpenDummyDetail("movie", "dummy-qa-nonexistent") }
+                )
+                TvMovieCard(
+                    title = "DUMMY — short",
+                    posterUrl = "",
+                    rating = "",
+                    quality = "4K",
+                    width = 135,
+                    height = 200,
+                    onClick = { onOpenDummyDetail("tv_series", "dummy-qa-nonexistent") }
+                )
+                TvMovieCard(
+                    title = "DUMMY — medium two-line fixture title here",
+                    posterUrl = "",
+                    rating = "8.8",
+                    quality = "HD",
+                    width = 135,
+                    height = 200,
+                    rank = 7,
+                    onClick = { onOpenDummyPlayer("movie", "dummy-qa-nonexistent") }
+                )
+            }
+            // Aspect-ratio stills: layout proofs at 21:9 / 16:9 / 4:3.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                DummyAspectStill(
+                    label = "DUMMY 21:9",
+                    ratio = 21f / 9f,
+                    onClick = { onOpenDummyPlayer("movie", "dummy-qa-nonexistent") },
+                    modifier = Modifier.weight(1f)
+                )
+                DummyAspectStill(
+                    label = "DUMMY 16:9",
+                    ratio = 16f / 9f,
+                    onClick = { onOpenDummyPlayer("movie", "dummy-qa-nonexistent") },
+                    modifier = Modifier.weight(1f)
+                )
+                DummyAspectStill(
+                    label = "DUMMY 4:3",
+                    ratio = 4f / 3f,
+                    onClick = { onOpenDummyPlayer("movie", "dummy-qa-nonexistent") },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            // Partial-row grids (1 item; 5 items in 4 columns): same tile
+            // styling + matrix edge math as the real genre grid.
+            DummyQaGrid(
+                title = "DUMMY grid — 1 item",
+                count = 1,
+                cols = 4,
+                onTileClick = { onOpenDummyDetail("movie", "dummy-qa-nonexistent") }
+            )
+            DummyQaGrid(
+                title = "DUMMY grid — 5 items (partial last row)",
+                count = 5,
+                cols = 4,
+                onTileClick = { onOpenDummyDetail("movie", "dummy-qa-nonexistent") }
+            )
+            // Real error states with Retry, via the dummy ids.
+            DevButton(
+                focusKey = "$currentRoute/action:open-dummy-detail",
+                label = "Open DUMMY detail (invalid id)",
+                icon = Icons.Default.Movie,
+                onClick = { onOpenDummyDetail("movie", "dummy-qa-nonexistent") },
+                modifier = Modifier.topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop)
+            )
+            DevButton(
+                focusKey = "$currentRoute/action:open-dummy-player",
+                label = "Open DUMMY player (invalid id)",
+                icon = Icons.Default.Movie,
+                onClick = { onOpenDummyPlayer("movie", "dummy-qa-nonexistent") },
+                modifier = Modifier.topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop)
+            )
+        }
+
         // ---- Back ----------------------------------------------------------
         DevButton(
             focusKey = "$currentRoute/action:back-to-settings",
             label = stringResource(R.string.dev_action_back),
             icon = Icons.Default.Settings,
             onClick = onBack,
-            modifier = Modifier.topEdgeBarEscape(barLinkRequester),
+            modifier = Modifier.topEdgeBarEscape(barLinkRequester, onEscape = scrollToTop),
             // Last focusable on screen — DOWN stays.
             isLast = true
         )
@@ -469,14 +617,16 @@ private fun DevButton(
         onClick = onClick,
         colors = ButtonDefaults.colors(
             containerColor = com.idlix.tv.ui.theme.NetflixBlack,
-            focusedContainerColor = com.idlix.tv.ui.theme.NetflixWhite,
+            // Stay dark on focus (never invert to white): the ring must read
+            // on the dark card, same as settings rows.
+            focusedContainerColor = com.idlix.tv.ui.theme.NetflixBlack,
             contentColor = com.idlix.tv.ui.theme.NetflixWhite,
-            focusedContentColor = com.idlix.tv.ui.theme.NetflixBlack
+            focusedContentColor = com.idlix.tv.ui.theme.NetflixWhite
         ),
-        scale = ButtonDefaults.scale(focusedScale = 1.05f),
+        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
         border = ButtonDefaults.border(
             focusedBorder = Border(
-                border = BorderStroke(2.dp, com.idlix.tv.ui.theme.NetflixWhite)
+                border = BorderStroke(2.5.dp, com.idlix.tv.ui.theme.NetflixWhite)
             )
         ),
         shape = ButtonDefaults.shape(androidx.compose.foundation.shape.RoundedCornerShape(6.dp)),
@@ -495,7 +645,7 @@ private fun DevButton(
             Text(
                 text = label,
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp
+                fontSize = 14.sp
             )
         }
     }
@@ -518,5 +668,126 @@ private fun DevRow(label: String, value: String) {
             fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f)
         )
+    }
+}
+
+/**
+ * Aspect-ratio layout proof (dummy harness): a focusable still at an exact
+ * ratio with a DUMMY label. Activating it opens the dummy player error
+ * route, so the tile is never a dead button.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun DummyAspectStill(
+    label: String,
+    ratio: Float,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.colors(
+            containerColor = com.idlix.tv.ui.theme.NetflixDarkCard,
+            contentColor = com.idlix.tv.ui.theme.NetflixLightGray,
+            focusedContainerColor = com.idlix.tv.ui.theme.NetflixRed,
+            focusedContentColor = com.idlix.tv.ui.theme.NetflixWhite
+        ),
+        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
+        border = ButtonDefaults.border(
+            focusedBorder = Border(
+                border = BorderStroke(2.5.dp, com.idlix.tv.ui.theme.NetflixWhite)
+            )
+        ),
+        shape = ButtonDefaults.shape(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+        modifier = modifier.aspectRatio(ratio)
+    ) {
+        Text(
+            text = label,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp
+        )
+    }
+}
+
+/**
+ * Partial-row grid proof (dummy harness): [count] focusable tiles in
+ * [cols] columns using the same tile styling + [tvMatrixNeighbors] edge
+ * math as the real genre grid, so 0/1/partial-last-row focus behavior can
+ * be verified without network. Tiles open the dummy detail error route.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun DummyQaGrid(
+    title: String,
+    count: Int,
+    cols: Int,
+    onTileClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tileRequesters = remember { mutableMapOf<Int, FocusRequester>() }
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = title,
+            color = com.idlix.tv.ui.theme.NetflixLightGray,
+            fontSize = 12.sp
+        )
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(cols),
+            // Fixed window, no nested scroll: D-pad still moves between the
+            // tiles; the outer column owns scrolling.
+            userScrollEnabled = false,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(152.dp)
+                .focusRestorer()
+        ) {
+            items(count) { index ->
+                val nav = tvMatrixNeighbors(index = index, size = count, cols = cols)
+                val tileRequester = tileRequesters.getOrPut(index) { FocusRequester() }
+                Box(
+                    Modifier.tvGridFocusFrame(horizontalPadding = 4.dp, verticalPadding = 8.dp)
+                ) {
+                    Button(
+                        onClick = onTileClick,
+                        colors = ButtonDefaults.colors(
+                            containerColor = com.idlix.tv.ui.theme.NetflixDarkCard,
+                            contentColor = com.idlix.tv.ui.theme.NetflixLightGray,
+                            focusedContainerColor = com.idlix.tv.ui.theme.NetflixRed,
+                            focusedContentColor = com.idlix.tv.ui.theme.NetflixWhite
+                        ),
+                        scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
+                        border = ButtonDefaults.border(
+                            focusedBorder = Border(
+                                border = BorderStroke(2.5.dp, com.idlix.tv.ui.theme.NetflixWhite)
+                            )
+                        ),
+                        shape = ButtonDefaults.shape(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(64.dp)
+                            .focusRequester(tileRequester)
+                            .focusProperties {
+                                up = if (nav.isFirstRow) FocusRequester.Cancel else (tileRequesters[nav.upIndex] ?: FocusRequester.Default)
+                                down = if (nav.downIndex == null) FocusRequester.Cancel else (tileRequesters[nav.downIndex] ?: FocusRequester.Default)
+                                left = if (nav.leftIndex == null) FocusRequester.Cancel else (tileRequesters[nav.leftIndex] ?: FocusRequester.Default)
+                                right = if (nav.rightIndex == null) FocusRequester.Cancel else (tileRequesters[nav.rightIndex] ?: FocusRequester.Default)
+                            }
+                    ) {
+                        Text(
+                            text = if (index == 0) "DUMMY — long tile title must ellipsize" else "DUMMY G$index",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
     }
 }

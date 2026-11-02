@@ -153,13 +153,6 @@
     <string name="quality_title">Video Quality</string>
     <string name="quality_recommended">(Recommended)</string>
     <string name="quality_badge_auto">AUTO</string>
-    <string name="picture_size">Picture size</string>
-    <string name="aspect_fit">Fit</string>
-    <string name="aspect_fit_desc">Entire picture · never cropped</string>
-    <string name="aspect_badge_fit">FIT</string>
-    <string name="aspect_zoom">Zoom</string>
-    <string name="aspect_zoom_desc">Fill screen · crops the long edges</string>
-    <string name="aspect_badge_zoom">ZOOM</string>
     <string name="quality_note">Applies instantly — playback keeps playing.</string>
     <string name="quality_auto_title">Auto</string>
     <string name="quality_detail_auto">Recommended · Best available</string>

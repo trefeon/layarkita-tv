@@ -15,9 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
@@ -27,6 +24,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,7 +34,6 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -59,7 +56,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -69,13 +66,17 @@ import androidx.tv.material3.Text
 import com.idlix.tv.R
 import com.idlix.tv.ui.components.TvLoadingSpinner
 import com.idlix.tv.ui.components.TvMovieCard
-import com.idlix.tv.ui.components.railFocusFrame
+import com.idlix.tv.ui.components.TvTextField
+import com.idlix.tv.ui.components.tvGridColumnCount
+import com.idlix.tv.ui.components.tvGridFocusFrame
+import com.idlix.tv.ui.components.tvMatrixNeighbors
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixDarkCard
 import com.idlix.tv.ui.theme.NetflixLightGray
 import com.idlix.tv.ui.theme.NetflixRed
 import com.idlix.tv.ui.theme.NetflixWhite
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -83,6 +84,9 @@ fun SearchScreen(
     onNavigateToDetail: (contentType: String, slug: String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SearchViewModel = viewModel(),
+    // Deep-link query (global SEARCH / launcher voice): consumed once into
+    // the view model; null keeps the current field content.
+    initialQuery: String? = null,
     // Detail-return key: "type/slug" of the originating result. Hoisted in
     // AppNavigation (same reason as the Genres grid key — the results grid
     // disposes on detail push, so an in-screen key would die there).
@@ -98,6 +102,14 @@ fun SearchScreen(
     val uiState by viewModel.uiState.collectAsState()
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+
+    // Grid freshness: the visible results belong to the live field text (not
+    // a stale or still-debouncing query). Only fresh results are a D-pad DOWN
+    // target; mid-typing DOWN stays in the field so focus never jumps rows.
+    val resultsFresh = !uiState.isLoading &&
+        uiState.query.isNotBlank() &&
+        uiState.results.isNotEmpty() &&
+        uiState.searchedQuery == uiState.query.trim()
 
     val searchFieldFocusRequester = remember { FocusRequester() }
     val clearButtonFocusRequester = remember { FocusRequester() }
@@ -123,6 +135,15 @@ fun SearchScreen(
     }
     val latestKey = rememberUpdatedState(refocusKey)
 
+    // Deep-link entry: a global-search voice query lands here from
+    // AppNavigation (onNewIntent QUERY / EXTRA_MEDIA_TITLE routing).
+    LaunchedEffect(initialQuery) {
+        val query = initialQuery
+        if (!query.isNullOrBlank() && query != uiState.query) {
+            viewModel.setQuery(query)
+        }
+    }
+
     val context = LocalContext.current
     val quickSearches = remember(context) {
         context.resources.getStringArray(R.array.quick_searches).toList()
@@ -134,30 +155,45 @@ fun SearchScreen(
     // first-row UP returns to the field; intra-grid moves stay on geometry.
     val screenWd = LocalConfiguration.current.screenWidthDp
     val searchCols = remember(screenWd) {
-        val gridW = (screenWd - 96 - 24).coerceAtLeast(135)
-        ((gridW + 16) / (135 + 16)).coerceAtLeast(1)
+        tvGridColumnCount(
+            screenWidthDp = screenWd,
+            minCellWidthDp = 140,
+            horizontalPaddingDp = 96,
+            contentInsetDp = 24,
+            spacingDp = 16
+        )
     }
 
     // Request initial focus on the search input bar when screen is first displayed.
     // Skipped when a detail-return key is pending: the return effect below
     // owns focus then, and a field request would win the race and strand the
-    // grid (same disposal-swap reason the key is hoisted).
+    // grid (same disposal-swap reason the key is hoisted). Park + retry
+    // (8x40ms): the nav-transition window drops the first request.
+    val escapeScope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         if (latestKey.value != null) return@LaunchedEffect
-        delay(120)
-        try {
-            searchFieldFocusRequester.requestFocus()
-        } catch (_: Exception) {}
+        repeat(8) {
+            try {
+                searchFieldFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+            delay(40)
+        }
     }
 
     // Automatically transition focus to results once loaded if requested by user action
+    // Grid-compose race: the first-cell requester attaches with the grid,
+    // which can lag the state commit by a frame — retry briefly (same 8x40ms
+    // idiom as the initial field focus above) instead of stranding focus.
     LaunchedEffect(uiState.isLoading, uiState.results, pendingFocusOnResults) {
         if (pendingFocusOnResults && !uiState.isLoading) {
             if (uiState.results.isNotEmpty()) {
                 pendingFocusOnResults = false
-                try {
-                    firstResultFocusRequester.requestFocus()
-                } catch (_: Exception) {}
+                repeat(8) {
+                    try {
+                        firstResultFocusRequester.requestFocus()
+                    } catch (_: Exception) {}
+                    delay(40)
+                }
             } else {
                 pendingFocusOnResults = false
                 try {
@@ -215,141 +251,111 @@ fun SearchScreen(
             .padding(horizontal = 48.dp, vertical = 20.dp)
             .padding(top = 12.dp)
     ) {
-        // Search Input Bar
-        val isBarFocused = isInputFocused || isClearFocused
+        // Search input: TvTextField owns the visuals, BACK-unfocus, IME and
+        // UP bar-escape; the field holds no per-key UP duplicate and the
+        // input-session trap is handled inside the component. The clear key
+        // stays a plain Button beside it.
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-                .background(NetflixDarkCard, RoundedCornerShape(8.dp))
-                .border(
-                    width = if (isBarFocused) 2.dp else 1.dp,
-                    color = if (isBarFocused) NetflixWhite else NetflixDarkCard,
-                    shape = RoundedCornerShape(8.dp)
-                )
-                .padding(horizontal = 14.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Default.Search,
-                contentDescription = stringResource(R.string.search),
-                tint = if (isBarFocused) NetflixWhite else NetflixLightGray
-            )
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            BasicTextField(
+            TvTextField(
                 value = uiState.query,
                 onValueChange = { viewModel.onQueryChange(it) },
+                hint = stringResource(R.string.search_placeholder),
+                leadingIcon = { focused ->
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = stringResource(R.string.search),
+                        tint = if (focused) NetflixWhite else NetflixLightGray
+                    )
+                },
                 textStyle = TextStyle(
                     color = NetflixWhite,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium
                 ),
-                cursorBrush = SolidColor(NetflixRed),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(
-                    onSearch = {
-                        keyboardController?.hide()
-                        if (uiState.results.isNotEmpty()) {
-                            try {
-                                firstResultFocusRequester.requestFocus()
-                            } catch (_: Exception) {}
-                        } else {
-                            pendingFocusOnResults = true
-                        }
+                imeAction = ImeAction.Search,
+                onImeAction = {
+                    keyboardController?.hide()
+                    // Immediate-search fast path: skip the settle window so
+                    // the full query searches at once, then land on the grid
+                    // when it arrives. Already-fresh results focus at once.
+                    viewModel.searchNow()
+                    if (resultsFresh) {
+                        try {
+                            firstResultFocusRequester.requestFocus()
+                        } catch (_: Exception) {}
+                    } else {
+                        pendingFocusOnResults = true
                     }
-                ),
-                singleLine = true,
+                },
                 modifier = Modifier
                     .weight(1f)
+                    .height(50.dp),
+                fieldModifier = Modifier
                     .focusRequester(searchFieldFocusRequester)
                     .then(if (entryLinkRequester != null) Modifier.focusRequester(entryLinkRequester) else Modifier)
-                    .onPreviewKeyEvent { keyEvent ->
-                        // Text fields hold an input session that can veto an
-                        // outgoing transfer: release it first, then move UP.
-                        // (Top-bar escape: plain search has no strictly-above
-                        // candidate once content scrolls under the floating bar.)
-                        if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.DirectionUp) {
-                            val link = barLinkRequester
-                            if (link != null) {
-                                try {
-                                    focusManager.clearFocus(force = true)
-                                } catch (_: Exception) {}
-                                try {
-                                    link.requestFocus()
-                                    true
-                                } catch (_: Exception) {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    }
                     .focusProperties {
-                        down = if (uiState.query.isBlank()) firstTagFocusRequester else firstResultFocusRequester
+                        down = if (uiState.query.isBlank()) {
+                            firstTagFocusRequester
+                        } else if (resultsFresh) {
+                            firstResultFocusRequester
+                        } else {
+                            FocusRequester.Cancel
+                        }
                         right = if (uiState.query.isNotEmpty()) clearButtonFocusRequester else FocusRequester.Default
                     }
-                    .onFocusChanged { isInputFocused = it.isFocused }
-                    .onPreviewKeyEvent { keyEvent ->
-                        if (keyEvent.type == KeyEventType.KeyDown) {
-                            when (keyEvent.key) {
-                                Key.DirectionDown -> {
-                                    keyboardController?.hide()
-                                    if (uiState.query.isBlank()) {
-                                        try {
-                                            firstTagFocusRequester.requestFocus()
-                                            true
-                                        } catch (_: Exception) {
-                                            false
-                                        }
-                                    } else if (uiState.results.isNotEmpty()) {
-                                        try {
-                                            firstResultFocusRequester.requestFocus()
-                                            true
-                                        } catch (_: Exception) {
-                                            false
-                                        }
-                                    } else {
+                    .onFocusChanged { isInputFocused = it.isFocused },
+                barEscapeLink = barLinkRequester,
+                onBarEscape = { gridState.scrollToItem(0) },
+                onPreviewKey = { keyEvent ->
+                    if (keyEvent.type != KeyEventType.KeyDown) {
+                        false
+                    } else {
+                        when (keyEvent.key) {
+                            Key.DirectionDown -> {
+                                keyboardController?.hide()
+                                if (uiState.query.isBlank()) {
+                                    try {
+                                        firstTagFocusRequester.requestFocus()
                                         true
-                                    }
-                                }
-                                Key.DirectionRight -> {
-                                    if (uiState.query.isNotEmpty()) {
-                                        try {
-                                            clearButtonFocusRequester.requestFocus()
-                                            true
-                                        } catch (_: Exception) {
-                                            false
-                                        }
-                                    } else {
+                                    } catch (_: Exception) {
                                         false
                                     }
+                                } else if (resultsFresh) {
+                                    try {
+                                        firstResultFocusRequester.requestFocus()
+                                        true
+                                    } catch (_: Exception) {
+                                        false
+                                    }
+                                } else {
+                                    // Search still settling (or stale rows on
+                                    // screen): stay in the field, keep typing.
+                                    true
                                 }
-                                // UP intentionally falls through: the top bar
-                                // owns the row above the field.
-                                else -> false
                             }
-                        } else {
-                            false
+                            Key.DirectionRight -> {
+                                if (uiState.query.isNotEmpty()) {
+                                    try {
+                                        clearButtonFocusRequester.requestFocus()
+                                        true
+                                    } catch (_: Exception) {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            else -> false
                         }
-                    },
-                decorationBox = { innerTextField ->
-                    if (uiState.query.isEmpty()) {
-                        Text(
-                            text = stringResource(R.string.search_placeholder),
-                            color = NetflixLightGray,
-                            fontSize = 14.sp
-                        )
                     }
-                    innerTextField()
                 }
             )
 
             if (uiState.query.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(8.dp))
                 Button(
                     onClick = {
                         viewModel.onQueryChange("")
@@ -374,7 +380,7 @@ fun SearchScreen(
                         .focusRequester(clearButtonFocusRequester)
                         .focusProperties {
                             left = searchFieldFocusRequester
-                            if (uiState.results.isNotEmpty()) {
+                            if (resultsFresh) {
                                 down = firstResultFocusRequester
                             }
                         }
@@ -391,7 +397,7 @@ fun SearchScreen(
                                         }
                                     }
                                     Key.DirectionDown -> {
-                                        if (uiState.results.isNotEmpty()) {
+                                        if (resultsFresh) {
                                             try {
                                                 firstResultFocusRequester.requestFocus()
                                                 true
@@ -403,13 +409,19 @@ fun SearchScreen(
                                         }
                                     }
                                     // UP goes home to the top bar (same input-
-                                    // session release as the field, for safety).
+                                    // session release as the field, for safety),
+                                    // pulling the results grid back to 0.
                                     Key.DirectionUp -> {
                                         val link = barLinkRequester
                                         if (link != null) {
                                             try {
                                                 focusManager.clearFocus(force = true)
                                             } catch (_: Exception) {}
+                                            escapeScope.launch {
+                                                try {
+                                                    gridState.scrollToItem(0)
+                                                } catch (_: Exception) {}
+                                            }
                                             try {
                                                 link.requestFocus()
                                                 true
@@ -436,6 +448,7 @@ fun SearchScreen(
 
         // Quick Search Tags for TV Remote (only shown when query is empty, matching mobile UX)
         if (uiState.query.isBlank()) {
+            val tagRequesters = remember { mutableMapOf<Int, FocusRequester>() }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -447,7 +460,7 @@ fun SearchScreen(
                 Text(
                     text = stringResource(R.string.popular_searches),
                     color = NetflixLightGray,
-                            fontSize = 14.sp,
+                    fontSize = 14.sp,
                     modifier = Modifier.padding(end = 8.dp)
                 )
                 LazyRow(
@@ -457,67 +470,71 @@ fun SearchScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
                     modifier = Modifier.focusRestorer()
                 ) {
-                    items(quickSearches) { tag ->
-                        val isFirstTag = tag == quickSearches.firstOrNull()
-                        val isLastTag = tag == quickSearches.lastOrNull()
-                        // Focus frame: same bring-into-view headroom idiom as
-                        // the rail cards so edge tags never crop their ring.
+                    itemsIndexed(quickSearches) { tagIndex, tag ->
+                        val isFirstTag = tagIndex == 0
+                        val isLastTag = tagIndex == quickSearches.lastIndex
+                        val tagFocusRequester = tagRequesters.getOrPut(tagIndex) { FocusRequester() }
+                        // Focus frame: headroom idiom so edge tags never crop their ring.
                         Box(
                             Modifier
-                                .railFocusFrame()
-                                .padding(horizontal = 4.dp, vertical = 8.dp)
+                                .tvGridFocusFrame(horizontalPadding = 4.dp, verticalPadding = 8.dp)
                         ) {
-                        Button(
-                            onClick = {
-                                try {
-                                    searchFieldFocusRequester.requestFocus()
-                                } catch (_: Exception) {}
-                                viewModel.onQueryChange(tag)
-                                pendingFocusOnResults = true
-                            },
-                            colors = ButtonDefaults.colors(
-                                containerColor = NetflixDarkCard,
-                                contentColor = NetflixLightGray,
-                                focusedContainerColor = NetflixRed,
-                                focusedContentColor = NetflixWhite
-                            ),
-                            scale = ButtonDefaults.scale(focusedScale = 1.08f),
-                            border = ButtonDefaults.border(
-                                focusedBorder = Border(
-                                    border = BorderStroke(2.dp, NetflixWhite)
-                                )
-                            ),
-                            shape = ButtonDefaults.shape(shape = RoundedCornerShape(4.dp)),
-                            modifier = Modifier
-                                .then(if (isFirstTag) Modifier.focusRequester(firstTagFocusRequester) else Modifier)
-                                .focusProperties {
-                                    up = searchFieldFocusRequester
-                                    if (isFirstTag) left = FocusRequester.Cancel
-                                    if (isLastTag) right = FocusRequester.Cancel
-                                }
-                                .onPreviewKeyEvent { keyEvent ->
-                                    if (keyEvent.type == KeyEventType.KeyDown) {
-                                        when (keyEvent.key) {
-                                            Key.DirectionUp -> {
-                                                try {
-                                                    searchFieldFocusRequester.requestFocus()
-                                                    true
-                                                } catch (_: Exception) {
-                                                    false
-                                                }
-                                            }
-                                            Key.DirectionDown -> {
-                                                true // Consume to prevent focus drop
-                                            }
-                                            else -> false
-                                        }
-                                    } else {
-                                        false
+                            Button(
+                                onClick = {
+                                    // Complete query: hide the keyboard (no
+                                    // refinement typing needed) and search at
+                                    // once. No field-focus bounce — it would
+                                    // pop Gboard over the results and the
+                                    // dying tag row would strand focus. The
+                                    // pending transfer lands on the grid.
+                                    keyboardController?.hide()
+                                    viewModel.searchQuery(tag)
+                                    pendingFocusOnResults = true
+                                },
+                                colors = ButtonDefaults.colors(
+                                    containerColor = NetflixDarkCard,
+                                    contentColor = NetflixLightGray,
+                                    focusedContainerColor = NetflixRed,
+                                    focusedContentColor = NetflixWhite
+                                ),
+                                scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                                border = ButtonDefaults.border(
+                                    focusedBorder = Border(
+                                        border = BorderStroke(2.dp, NetflixWhite)
+                                    )
+                                ),
+                                shape = ButtonDefaults.shape(shape = RoundedCornerShape(4.dp)),
+                                modifier = Modifier
+                                    .focusRequester(tagFocusRequester)
+                                    .then(if (isFirstTag) Modifier.focusRequester(firstTagFocusRequester) else Modifier)
+                                    .focusProperties {
+                                        up = searchFieldFocusRequester
+                                        left = if (isFirstTag) FocusRequester.Cancel else (tagRequesters[tagIndex - 1] ?: FocusRequester.Default)
+                                        right = if (isLastTag) FocusRequester.Cancel else (tagRequesters[tagIndex + 1] ?: FocusRequester.Default)
                                     }
-                                }
-                        ) {
-                            Text(text = tag, fontSize = 12.sp)
-                        }
+                                    .onPreviewKeyEvent { keyEvent ->
+                                        if (keyEvent.type == KeyEventType.KeyDown) {
+                                            when (keyEvent.key) {
+                                                Key.DirectionUp -> {
+                                                    try {
+                                                        searchFieldFocusRequester.requestFocus()
+                                                        true
+                                                    } catch (_: Exception) {
+                                                        false
+                                                    }
+                                                }
+                                                Key.DirectionDown -> {
+                                                    true // Consume to prevent focus drop
+                                                }
+                                                else -> false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    }
+                            ) {
+                                Text(text = tag, fontSize = 12.sp)
+                            }
                         }
                     }
                 }
@@ -548,7 +565,7 @@ fun SearchScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
-                        onClick = { viewModel.onQueryChange(uiState.query) },
+                        onClick = { viewModel.searchNow() },
                         colors = ButtonDefaults.colors(
                             containerColor = NetflixRed,
                             contentColor = NetflixWhite,
@@ -583,9 +600,10 @@ fun SearchScreen(
                     modifier = Modifier.align(Alignment.Center)
                 )
             } else {
+                val cellRequesters = remember { mutableMapOf<Int, FocusRequester>() }
                 LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Adaptive(135.dp),
+                    columns = GridCells.Fixed(searchCols),
                     // Scale-allowance insets: 12dp each side/top covers the
                     // 1.12x ring overflow so edge cards settle fully visible.
                     contentPadding = PaddingValues(
@@ -605,14 +623,8 @@ fun SearchScreen(
                 ) {
                     itemsIndexed(uiState.results, key = { _, it -> it.id }) { index, item ->
                         val isFirst = index == 0
-                        val size = uiState.results.size
-                        val lastRowCount = if (size % searchCols == 0) searchCols else size % searchCols
-                        val lastRowStart = (size - lastRowCount).coerceAtLeast(0)
-                        val isFirstCol = index % searchCols == 0
-                        val isLastCol = index % searchCols == searchCols - 1 || index == size - 1
-                        val isFirstRow = index < searchCols
-                        val isLastRow = index >= lastRowStart
-                        val cellFocusRequester = remember { FocusRequester() }
+                        val nav = tvMatrixNeighbors(index = index, size = uiState.results.size, cols = searchCols)
+                        val cellFocusRequester = cellRequesters.getOrPut(index) { FocusRequester() }
                         if (refocusKey != null && refocusKey == "${item.contentType}/${item.slug}") {
                             LaunchedEffect(refocusKey) {
                                 try {
@@ -621,13 +633,9 @@ fun SearchScreen(
                                 clearFocusKey()
                             }
                         }
-                        // 12dp focus frame: grid cells sit 48dp from the
-                        // overscan edge; the frame keeps the 1.12x ring
-                        // intact when a row settles at the viewport edge.
                         Box(
                             Modifier
-                                .railFocusFrame()
-                                .padding(vertical = 12.dp)
+                                .tvGridFocusFrame(horizontalPadding = 4.dp, verticalPadding = 8.dp)
                         ) {
                             TvMovieCard(
                                 title = item.title,
@@ -638,23 +646,24 @@ fun SearchScreen(
                                 } else {
                                     stringResource(R.string.content_badge_movie)
                                 },
+                                fillWidth = true,
                                 onClick = { navigateToDetail(item.contentType, item.slug) },
                                 modifier = Modifier
                                     .focusRequester(cellFocusRequester)
                                     .then(if (isFirst) Modifier.focusRequester(firstResultFocusRequester) else Modifier)
                                     .focusProperties {
-                                        // First-row UP returns to the field;
-                                        // deeper rows use intra-grid geometry.
-                                        if (isFirstRow) up = searchFieldFocusRequester
-                                        // Terminal edges stay: col-0 LEFT and
-                                        // last-col RIGHT never leap to the gear,
-                                        // last-row DOWN never drops off-grid.
-                                        if (isFirstCol) left = FocusRequester.Cancel
-                                        if (isLastCol) right = FocusRequester.Cancel
-                                        if (isLastRow) down = FocusRequester.Cancel
+                                        up = if (nav.isFirstRow) searchFieldFocusRequester else (nav.upIndex?.let { cellRequesters[it] } ?: FocusRequester.Default)
+                                        down = if (nav.downIndex == null) FocusRequester.Cancel else (cellRequesters[nav.downIndex] ?: FocusRequester.Default)
+                                        left = if (nav.leftIndex == null) FocusRequester.Cancel else (cellRequesters[nav.leftIndex] ?: FocusRequester.Default)
+                                        right = if (nav.rightIndex == null) FocusRequester.Cancel else (cellRequesters[nav.rightIndex] ?: FocusRequester.Default)
                                     }
                                     .onPreviewKeyEvent { keyEvent ->
-                                        if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.DirectionUp && isFirst) {
+                                        if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.DirectionUp && nav.isFirstRow) {
+                                            escapeScope.launch {
+                                                try {
+                                                    gridState.scrollToItem(0)
+                                                } catch (_: Exception) {}
+                                            }
                                             try {
                                                 searchFieldFocusRequester.requestFocus()
                                                 true

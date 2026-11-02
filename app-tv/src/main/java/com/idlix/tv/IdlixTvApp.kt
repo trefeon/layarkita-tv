@@ -7,11 +7,14 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.idlix.data.net.CoreHttp
 import com.idlix.data.net.IdlixDomainResolver
+import com.idlix.data.local.WatchHistoryStore
 import com.idlix.tv.startup.ErrorLog
 import com.idlix.tv.startup.StartupRepair
+import com.idlix.tv.tv.WatchNextSync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
 class IdlixTvApp : Application(), ImageLoaderFactory {
@@ -48,6 +51,18 @@ class IdlixTvApp : Application(), ImageLoaderFactory {
             com.idlix.tv.update.UpdateCheckWorker.schedule(this)
         } catch (_: Throwable) {
         }
+        // Leanback launcher rows (preview channel + Watch Next) mirror the
+        // history store; debounced so progress ticks don't hammer the
+        // provider. The first emission is the current history, so this also
+        // covers cold-start sync. Fail-silent by contract (see WatchNextSync).
+        startupScope.launch {
+            try {
+                WatchHistoryStore.getInstance(this@IdlixTvApp).historyFlow
+                    .debounce(2_000)
+                    .collect { WatchNextSync.syncFromStore(this@IdlixTvApp) }
+            } catch (_: Throwable) {
+            }
+        }
         // Warm the resolver off the main thread; a failed/unsurfaced resolve
         // (still on FALLBACK_URL) schedules a WorkManager retry in 6h when the
         // work runtime is present, silently skipped otherwise.
@@ -73,7 +88,7 @@ class IdlixTvApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         val builder = ImageLoader.Builder(this)
             .okHttpClient(CoreHttp.okHttpClient)
-            .allowRgb565(true)
+            .allowRgb565(false)
             .respectCacheHeaders(false)
             .decoderDispatcher(Dispatchers.IO)
             .fetcherDispatcher(Dispatchers.IO)
@@ -91,7 +106,7 @@ class IdlixTvApp : Application(), ImageLoaderFactory {
             builder.diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(150L * 1024 * 1024) // 150 MB
+                    .maxSizeBytes(250L * 1024 * 1024) // 250 MB
                     .build()
             }
         }

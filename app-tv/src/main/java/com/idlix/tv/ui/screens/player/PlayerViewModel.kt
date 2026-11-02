@@ -1,6 +1,7 @@
 package com.idlix.tv.ui.screens.player
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.idlix.data.local.WatchHistoryStore
@@ -50,6 +51,50 @@ class PlayerViewModel(
 
     private val _uiState = MutableStateFlow(PlayerUiState(isLoading = false))
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
+
+    // Hoisted picker tokens: the screen consumes these flows instead of
+    // owning its own remember{} copies, so quality/speed/zoom/audio-language
+    // survive recomposition and stay consistent with the persisted prefs.
+    // Applied live to the controller (track params / scaling mode), never a
+    // player rebuild.
+    private val appCtx: android.content.Context
+        get() = getApplication<Application>().applicationContext
+
+    private val _tokenQuery = MutableStateFlow("")
+    val tokenQuery: StateFlow<String> = _tokenQuery.asStateFlow()
+
+    private val _selectedQuality =
+        MutableStateFlow(TvPlaybackQuality.fromPrefsValue(null))
+    val selectedQuality: StateFlow<TvPlaybackQuality> = _selectedQuality.asStateFlow()
+
+    private val _selectedSpeed =
+        MutableStateFlow(TvPlaybackSpeed.fromPrefsValue(null))
+    val selectedSpeed: StateFlow<TvPlaybackSpeed> = _selectedSpeed.asStateFlow()
+
+    private val _audioLanguage = MutableStateFlow<String?>(null)
+    val audioLanguage: StateFlow<String?> = _audioLanguage.asStateFlow()
+
+    /** Loads persisted picker tokens; called once per player-screen entry. */
+    fun loadPickerTokens() {
+        _selectedQuality.value = loadPlaybackQuality(appCtx)
+        _selectedSpeed.value = loadPlaybackSpeed(appCtx)
+        _audioLanguage.value = loadAudioLanguage(appCtx)
+    }
+
+    fun setQuality(quality: TvPlaybackQuality) {
+        savePlaybackQuality(appCtx, quality)
+        _selectedQuality.value = quality
+    }
+
+    fun setSpeed(speed: TvPlaybackSpeed) {
+        savePlaybackSpeed(appCtx, speed)
+        _selectedSpeed.value = speed
+    }
+
+    fun setAudioLanguage(language: String?) {
+        saveAudioLanguage(appCtx, language)
+        _audioLanguage.value = language
+    }
 
     private var playbackJob: Job? = null
     private var resolveNextEpisodeJob: Job? = null
@@ -146,6 +191,11 @@ class PlayerViewModel(
             result.onSuccess { resolved ->
                 val defaultSub = resolved.subtitles.firstOrNull { it.lang == "id" }
                     ?: resolved.subtitles.firstOrNull()
+                _tokenQuery.value = try {
+                    Uri.parse(resolved.hlsMasterUrl).query.orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
 
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,

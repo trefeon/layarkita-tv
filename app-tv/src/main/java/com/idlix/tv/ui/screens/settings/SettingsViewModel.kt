@@ -12,8 +12,10 @@ import com.idlix.data.repository.SubdlRepository
 import com.idlix.tv.BuildConfig
 import com.idlix.tv.R
 import com.idlix.tv.startup.ErrorLog
+import com.idlix.tv.tv.WatchNextSync
 import com.idlix.tv.ui.screens.player.loadAudioStabilizer
 import com.idlix.tv.ui.screens.player.saveAudioStabilizer
+import com.idlix.tv.update.PendingUpdateStore
 import com.idlix.tv.update.UpdateChecker
 import com.idlix.tv.update.UpdateDownloader
 import com.idlix.tv.update.UpdateInstaller
@@ -223,6 +225,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun clearWatchHistory() {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { WatchHistoryStore.getInstance(app).clearAll() }
+            runCatching { WatchNextSync.clearAll(app) }
             _historyCleared.value = true
         }
     }
@@ -379,6 +382,28 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             ?: LANG_INDONESIAN
         refreshResolverInfo()
         refreshErrorLog()
+        // Notification tap lands here with a persisted Available payload.
+        consumePendingUpdate()
+    }
+
+    /**
+     * Surfaces a background-check Available state (notification handoff).
+     * Never clobbers an in-flight check/download or a downloaded file.
+     */
+    fun surfaceAvailableUpdate(version: String, notes: String, assetUrl: String, sizeBytes: Long) {
+        val cur = _updateState.value
+        if (cur is UpdateState.Checking ||
+            cur is UpdateState.Downloading ||
+            cur is UpdateState.Downloaded
+        ) {
+            return
+        }
+        _updateState.value = UpdateState.Available(version, notes, assetUrl, sizeBytes)
+    }
+
+    private fun consumePendingUpdate() {
+        val pending = PendingUpdateStore.consume(app) ?: return
+        surfaceAvailableUpdate(pending.version, pending.notes, pending.assetUrl, pending.sizeBytes)
     }
 
     fun refreshErrorLog() {

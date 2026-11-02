@@ -1,6 +1,6 @@
 package com.idlix.tv.ui.screens.settings.components
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,20 +10,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.tv.material3.Button
-import androidx.tv.material3.Border
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.ListItem
 import androidx.tv.material3.Text
 import com.idlix.tv.R
-import com.idlix.tv.ui.components.railFocusFrame
+import com.idlix.tv.ui.components.tvGridFocusFrame
 import com.idlix.tv.ui.components.TvLoadingSpinner
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixDarkCard
@@ -62,7 +65,7 @@ fun UpdateSettingsRow(
 
         when (state) {
             is UpdateState.Idle -> {
-                UpdateButton(
+                UpdateRow(
                     label = stringResource(R.string.update_check),
                     onClick = onCheckClick,
                     modifier = checkButtonModifier
@@ -91,10 +94,9 @@ fun UpdateSettingsRow(
                     color = NetflixLightGray
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                UpdateButton(
+                UpdateRow(
                     label = stringResource(R.string.update_check),
                     onClick = onCheckClick,
-                    primary = false,
                     modifier = checkButtonModifier
                 )
             }
@@ -128,7 +130,7 @@ fun UpdateSettingsRow(
                     color = NetflixLightGray
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                UpdateButton(
+                UpdateRow(
                     label = stringResource(R.string.update_download),
                     onClick = onDownloadClick,
                     modifier = checkButtonModifier
@@ -163,7 +165,7 @@ fun UpdateSettingsRow(
                     color = NetflixWhite
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                UpdateButton(
+                UpdateRow(
                     label = stringResource(R.string.update_install),
                     onClick = onInstallClick,
                     modifier = checkButtonModifier
@@ -178,7 +180,7 @@ fun UpdateSettingsRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                UpdateButton(
+                UpdateRow(
                     label = stringResource(R.string.update_retry),
                     onClick = onCheckClick,
                     modifier = checkButtonModifier
@@ -190,38 +192,38 @@ fun UpdateSettingsRow(
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun UpdateButton(
+private fun UpdateRow(
     label: String,
     onClick: () -> Unit,
-    primary: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    // Focus frame: 4dp headroom covers the 1.05x zoom + 2dp ring so the
-    // entry button never crops at the scroll-viewport edge.
+    // Focus frame: 4dp headroom covers the zoom overflow + 2dp ring so the
+    // entry row never crops at the scroll-viewport edge. The ring is drawn
+    // explicitly (not via ListItem defaults) so focus stays visible on any
+    // theme container.
+    var focused by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .railFocusFrame()
-            .padding(4.dp)
+            .tvGridFocusFrame(horizontalPadding = 0.dp, verticalPadding = 4.dp)
     ) {
-    Button(
-        onClick = onClick,
-        modifier = modifier,
-        colors = ButtonDefaults.colors(
-            containerColor = if (primary) NetflixRed else NetflixBlack,
-            contentColor = NetflixWhite,
-            focusedContainerColor = if (primary) NetflixRed else NetflixBlack,
-            focusedContentColor = NetflixWhite
-        ),
-        scale = ButtonDefaults.scale(focusedScale = 1.05f),
-        border = ButtonDefaults.border(
-            focusedBorder = Border(
-                border = BorderStroke(2.dp, NetflixWhite)
-            )
-        ),
-        shape = ButtonDefaults.shape(shape = RoundedCornerShape(6.dp))
-    ) {
-        Text(text = label, fontSize = 14.sp)
-    }
+        ListItem(
+            selected = false,
+            onClick = onClick,
+            headlineContent = {
+                Text(
+                    text = label,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            modifier = modifier
+                .onFocusChanged { focused = it.isFocused }
+                .border(
+                    width = if (focused) 2.5.dp else 0.dp,
+                    color = if (focused) NetflixBlack else NetflixDarkCard,
+                    shape = RoundedCornerShape(8.dp)
+                )
+        )
     }
 }
 

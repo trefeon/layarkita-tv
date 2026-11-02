@@ -8,6 +8,7 @@ import com.idlix.data.model.CollectionItem
 import com.idlix.data.model.MovieItem
 import com.idlix.data.model.SeriesItem
 import com.idlix.data.model.WatchHistoryItem
+import com.idlix.data.model.toSeriesItem
 import com.idlix.data.repository.IdlixRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 data class HomeUiState(
     val isLoading: Boolean = false,
     val heroMovie: MovieItem? = null,
+    val featured: List<MovieItem> = emptyList(),
     val continueWatching: List<WatchHistoryItem> = emptyList(),
     val trending: List<MovieItem> = emptyList(),
     val popularMovies: List<MovieItem> = emptyList(),
@@ -52,18 +54,30 @@ class HomeViewModel(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null, errorRes = null)
             try {
-                var trending = repository.getTrendingMovies()
-                var popular = repository.getPopularMovies()
-                var series = repository.getPopularSeries()
+                var homepage = runCatching { repository.getHomepageData() }.getOrNull()
+                var featured = homepage?.featured.orEmpty()
+                var trending = homepage?.trendingNow?.takeIf { it.isNotEmpty() } ?: repository.getTrendingMovies()
+                var popular = homepage?.trendingCountry?.takeIf { it.isNotEmpty() }
+                    ?: homepage?.latestMovies?.takeIf { it.isNotEmpty() }
+                    ?: repository.getPopularMovies()
+                var series = repository.getPopularSeries().ifEmpty {
+                    homepage?.latestSeries?.map { it.toSeriesItem() }.orEmpty()
+                }
 
                 // If all returned empty, wait 1s and retry once (network socket warmup on startup)
-                if (trending.isEmpty() && popular.isEmpty() && series.isEmpty()) {
+                if (featured.isEmpty() && trending.isEmpty() && popular.isEmpty() && series.isEmpty()) {
                     kotlinx.coroutines.delay(1000)
-                    trending = repository.getTrendingMovies()
-                    popular = repository.getPopularMovies()
-                    series = repository.getPopularSeries()
+                    homepage = runCatching { repository.getHomepageData() }.getOrNull()
+                    featured = homepage?.featured.orEmpty()
+                    trending = homepage?.trendingNow?.takeIf { it.isNotEmpty() } ?: repository.getTrendingMovies()
+                    popular = homepage?.trendingCountry?.takeIf { it.isNotEmpty() }
+                        ?: homepage?.latestMovies?.takeIf { it.isNotEmpty() }
+                        ?: repository.getPopularMovies()
+                    series = repository.getPopularSeries().ifEmpty {
+                        homepage?.latestSeries?.map { it.toSeriesItem() }.orEmpty()
+                    }
                 }
-                if (trending.isEmpty() && popular.isEmpty() && series.isEmpty()) {
+                if (featured.isEmpty() && trending.isEmpty() && popular.isEmpty() && series.isEmpty()) {
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         error = null,
@@ -71,7 +85,6 @@ class HomeViewModel(
                     )
                     return@launch
                 }
-
 
                 val action = repository.getMoviesByGenre("action")
 
@@ -82,7 +95,8 @@ class HomeViewModel(
 
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    heroMovie = trending.firstOrNull() ?: popular.firstOrNull(),
+                    heroMovie = featured.firstOrNull() ?: trending.firstOrNull() ?: popular.firstOrNull(),
+                    featured = featured,
                     trending = trending,
                     popularMovies = popular,
                     popularSeries = series,

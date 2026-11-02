@@ -12,6 +12,7 @@ import com.idlix.data.model.CollectionDetailResponse
 import com.idlix.data.model.CollectionListResponse
 import com.idlix.data.model.EpisodeResponse
 import com.idlix.data.model.GenreListResponse
+import com.idlix.data.model.HomepageData
 import com.idlix.data.model.MovieDetail
 import com.idlix.data.model.MovieItem
 import com.idlix.data.model.MovieListResponse
@@ -68,6 +69,13 @@ class IdlixRepository(
 ) {
 
     // ------------------------------------------------------------ catalog
+
+    suspend fun getHomepageData(): HomepageData = withContext(Dispatchers.IO) {
+        val key = "homepage"
+        cache.get(key, HomepageData::class.java) ?: api.getHomepage().also {
+            cache.put(key, it, LIST_TTL_MS)
+        }
+    }
 
     suspend fun getMovies(
         page: Int = 1,

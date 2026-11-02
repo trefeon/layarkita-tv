@@ -35,6 +35,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import com.idlix.tv.R
+import com.idlix.tv.ui.components.TvSizing
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.lazy.LazyColumn
@@ -67,18 +68,13 @@ fun TvQualityPickerModal(
     isVisible: Boolean,
     currentQuality: TvPlaybackQuality,
     availableHeights: Set<Int> = emptySet(),
-    isZoom: Boolean = false,
     onSelectQuality: (TvPlaybackQuality) -> Unit,
-    onSelectAspect: (Boolean) -> Unit = {},
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (!isVisible) return
 
     val firstItemFocusRequester = remember { FocusRequester() }
-    // Bottom edge trap (Zoom card is the last focusable; the note below is a
-    // plain Text): DOWN loops to itself so focus never leaks onto the player.
-    val lastItemFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(isVisible) {
         if (isVisible) {
@@ -186,37 +182,6 @@ fun TvQualityPickerModal(
 
                 item {
                     Text(
-                        text = stringResource(R.string.picture_size),
-                        color = NetflixWhite,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-                item {
-                    QualityOptionCard(
-                        title = stringResource(R.string.aspect_fit),
-                        subtitle = stringResource(R.string.aspect_fit_desc),
-                        badge = stringResource(R.string.aspect_badge_fit),
-                        isSelected = !isZoom,
-                        onClick = { onSelectAspect(false) },
-                    )
-                }
-                item {
-                    QualityOptionCard(
-                        title = stringResource(R.string.aspect_zoom),
-                        subtitle = stringResource(R.string.aspect_zoom_desc),
-                        badge = stringResource(R.string.aspect_badge_zoom),
-                        isSelected = isZoom,
-                        onClick = { onSelectAspect(true) },
-                        modifier = Modifier
-                            .focusRequester(lastItemFocusRequester)
-                            .focusProperties { down = lastItemFocusRequester }
-                    )
-                }
-
-                item {
-                    Text(
                         text = stringResource(R.string.quality_note),
                         color = NetflixLightGray,
                         fontSize = 12.sp,
@@ -252,10 +217,10 @@ private fun QualityOptionCard(
             containerColor = if (isSelected) NetflixRed.copy(alpha = 0.25f) else NetflixDarkCard,
             focusedContainerColor = NetflixRed
         ),
-        scale = CardDefaults.scale(focusedScale = 1.04f),
+        scale = CardDefaults.scale(focusedScale = TvSizing.CardFocusScale),
         border = CardDefaults.border(
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NetflixWhite)
+                border = BorderStroke(2.5.dp, NetflixWhite)
             ),
             border = if (isSelected) {
                 Border(border = BorderStroke(1.dp, NetflixRed))

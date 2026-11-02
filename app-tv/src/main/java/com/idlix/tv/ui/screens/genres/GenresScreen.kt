@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -40,12 +41,16 @@ import androidx.tv.material3.Border
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.idlix.tv.R
 import com.idlix.tv.ui.components.TvErrorState
 import com.idlix.tv.ui.components.TvLoadingSpinner
-import com.idlix.tv.ui.components.railFocusFrame
+import com.idlix.tv.ui.components.TvSizing
 import com.idlix.tv.ui.components.topEdgeBarEscape
+import com.idlix.tv.ui.components.tvGridColumnCount
+import com.idlix.tv.ui.components.tvGridFocusFrame
+import com.idlix.tv.ui.components.tvMatrixNeighbors
 import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.theme.NetflixDarkCard
 import com.idlix.tv.ui.theme.NetflixLightGray
@@ -71,13 +76,15 @@ fun GenresScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val firstTileFocusRequester = remember { FocusRequester() }
-    // Column-aware grid edges (see SearchScreen): Adaptive(180dp) span varies
-    // with panel width. First-col LEFT stays, last-col RIGHT stays, last-row
-    // DOWN stays; first-row UP escapes to the bar, deeper rows use geometry.
     val screenWd = LocalConfiguration.current.screenWidthDp
     val genreCols = remember(screenWd) {
-        val gridW = (screenWd - 96 - 24).coerceAtLeast(180)
-        ((gridW + 16) / (180 + 16)).coerceAtLeast(1)
+        tvGridColumnCount(
+            screenWidthDp = screenWd,
+            minCellWidthDp = 180,
+            horizontalPaddingDp = 96,
+            contentInsetDp = 24,
+            spacingDp = 16
+        )
     }
     val navigateToGenre: (String, String) -> Unit = { slug, name ->
         onRefocusKeyChange(slug)
@@ -94,7 +101,9 @@ fun GenresScreen(
 
     // No pending key: park on the first tile. `firstLoad` gates this to the
     // first settled run of THIS screen instance so a late data re-emission
-    // never steals a restored tile's focus.
+    // never steals a restored tile's focus. Park + retry: the nav-transition
+    // window drops the first request, so pull the grid to 0 and re-assert
+    // (8x40ms) — entry never parks black.
     var firstLoad by remember { mutableStateOf(true) }
     LaunchedEffect(uiState.isLoading, uiState.genres) {
         if (uiState.isLoading) return@LaunchedEffect
@@ -102,8 +111,14 @@ fun GenresScreen(
         firstLoad = false
         if (uiState.genres.isNotEmpty() && refocusKey == null && first) {
             try {
-                firstTileFocusRequester.requestFocus()
+                gridState.scrollToItem(0)
             } catch (_: Exception) {}
+            repeat(8) {
+                try {
+                    firstTileFocusRequester.requestFocus()
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(40)
+            }
         }
     }
 
@@ -163,13 +178,13 @@ fun GenresScreen(
                 Text(
                     text = stringResource(R.string.genres),
                     color = NetflixWhite,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.headlineSmall
                 )
                 Spacer(modifier = Modifier.height(16.dp))
+                val tileRequesters = remember { mutableMapOf<Int, FocusRequester>() }
                 LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Adaptive(180.dp),
+                    columns = GridCells.Fixed(genreCols),
                     // Scale-allowance insets: 12dp each side/top covers the
                     // 1.08x ring overflow so edge tiles settle fully visible.
                     contentPadding = PaddingValues(
@@ -186,14 +201,8 @@ fun GenresScreen(
                 ) {
                     itemsIndexed(uiState.genres, key = { _, g -> g.slug.ifBlank { g.id } }) { index, genre ->
                         val isFirst = index == 0
-                        val size = uiState.genres.size
-                        val lastRowCount = if (size % genreCols == 0) genreCols else size % genreCols
-                        val lastRowStart = (size - lastRowCount).coerceAtLeast(0)
-                        val isFirstCol = index % genreCols == 0
-                        val isLastCol = index % genreCols == genreCols - 1 || index == size - 1
-                        val isFirstRow = index < genreCols
-                        val isLastRow = index >= lastRowStart
-                        val tileFocusRequester = remember { FocusRequester() }
+                        val nav = tvMatrixNeighbors(index = index, size = uiState.genres.size, cols = genreCols)
+                        val tileFocusRequester = tileRequesters.getOrPut(index) { FocusRequester() }
                         if (refocusKey != null && refocusKey == genre.slug) {
                             LaunchedEffect(refocusKey) {
                                 try {
@@ -202,12 +211,9 @@ fun GenresScreen(
                                 clearFocusKey()
                             }
                         }
-                        // 12dp focus frame: same 1.12x-ring headroom idiom as
-                        // the search-results grid.
                         Box(
                             Modifier
-                                .railFocusFrame()
-                                .padding(vertical = 12.dp)
+                                .tvGridFocusFrame(horizontalPadding = 4.dp, verticalPadding = 8.dp)
                         ) {
                             Button(
                                 onClick = { navigateToGenre(genre.slug, genre.name) },
@@ -217,10 +223,13 @@ fun GenresScreen(
                                     focusedContainerColor = NetflixRed,
                                     focusedContentColor = NetflixWhite
                                 ),
-                                scale = ButtonDefaults.scale(focusedScale = 1.08f),
+                                scale = ButtonDefaults.scale(focusedScale = TvSizing.CardFocusScale),
                                 border = ButtonDefaults.border(
+                                    border = Border(
+                                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+                                    ),
                                     focusedBorder = Border(
-                                        border = BorderStroke(2.dp, NetflixWhite)
+                                        border = BorderStroke(2.5.dp, NetflixWhite)
                                     )
                                 ),
                                 shape = ButtonDefaults.shape(shape = RoundedCornerShape(8.dp)),
@@ -232,6 +241,7 @@ fun GenresScreen(
                                     .then(if (isFirst && entryLinkRequester != null) Modifier.focusRequester(entryLinkRequester) else Modifier)
                                     .topEdgeBarEscape(
                                         barLinkRequester,
+                                        force = nav.isFirstRow,
                                         onEscape = {
                                             try {
                                                 gridState.scrollToItem(0)
@@ -239,15 +249,10 @@ fun GenresScreen(
                                         }
                                     )
                                     .focusProperties {
-                                        // First-row UP escapes to the bar via the
-                                        // position-gated modifier above; deeper rows
-                                        // use intra-grid geometry. Terminal edges
-                                        // stay so focus never leaps to the gear or
-                                        // drops off-grid.
-                                        if (isFirstRow && barLinkRequester != null) up = barLinkRequester
-                                        if (isFirstCol) left = FocusRequester.Cancel
-                                        if (isLastCol) right = FocusRequester.Cancel
-                                        if (isLastRow) down = FocusRequester.Cancel
+                                        up = if (nav.isFirstRow) (barLinkRequester ?: FocusRequester.Cancel) else (nav.upIndex?.let { tileRequesters[it] } ?: FocusRequester.Default)
+                                        down = if (nav.downIndex == null) FocusRequester.Cancel else (tileRequesters[nav.downIndex] ?: FocusRequester.Default)
+                                        left = if (nav.leftIndex == null) FocusRequester.Cancel else (tileRequesters[nav.leftIndex] ?: FocusRequester.Default)
+                                        right = if (nav.rightIndex == null) FocusRequester.Cancel else (tileRequesters[nav.rightIndex] ?: FocusRequester.Default)
                                     }
                             ) {
                                 Text(

@@ -142,13 +142,6 @@
     <string name="quality_title">Kualitas Video</string>
     <string name="quality_recommended">(Disarankan)</string>
     <string name="quality_badge_auto">AUTO</string>
-    <string name="picture_size">Ukuran gambar</string>
-    <string name="aspect_fit">Fit</string>
-    <string name="aspect_fit_desc">Seluruh gambar · tanpa terpotong</string>
-    <string name="aspect_badge_fit">FIT</string>
-    <string name="aspect_zoom">Zoom</string>
-    <string name="aspect_zoom_desc">Layar penuh · tepi panjang terpotong</string>
-    <string name="aspect_badge_zoom">ZOOM</string>
     <string name="quality_note">Berlaku langsung — pemutaran tidak berhenti.</string>
     <string name="quality_auto_title">Otomatis</string>
     <string name="quality_detail_auto">Disarankan · Kualitas terbaik</string>

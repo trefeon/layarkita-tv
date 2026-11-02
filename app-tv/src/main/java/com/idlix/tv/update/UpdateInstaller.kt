@@ -22,6 +22,13 @@ object UpdateInstaller {
 
     const val APK_MIME_TYPE = "application/vnd.android.package-archive"
 
+    /**
+     * Intent extra carrying a downloaded APK uri string for install-on-launch
+     * (see MainActivity): the updater/worker drops the file + posts a
+     * notification, and a tap (or cold start) hands it here for install.
+     */
+    const val EXTRA_PENDING_UPDATE = "com.idlix.tv.EXTRA_PENDING_UPDATE"
+
     fun canInstallUnknownApps(context: Context): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.packageManager.canRequestPackageInstalls()

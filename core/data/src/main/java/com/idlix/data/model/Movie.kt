@@ -10,19 +10,38 @@ data class MovieListResponse(
 )
 
 @Serializable
+data class HomepageData(
+    val featured: List<MovieItem> = emptyList(),
+    val trendingNow: List<MovieItem> = emptyList(),
+    val trendingCountry: List<MovieItem> = emptyList(),
+    val networkOriginals: List<MovieItem> = emptyList(),
+    val latestMovies: List<MovieItem> = emptyList(),
+    val latestSeries: List<MovieItem> = emptyList()
+)
+
+@Serializable
 data class MovieItem(
     val id: String = "",
     val title: String = "",
     val slug: String = "",
     val posterPath: String? = null,
     val backdropPath: String? = null,
+    val logoPath: String? = null,
+    val overview: String? = null,
+    val tagline: String? = null,
     val releaseDate: String? = null,
+    val firstAirDate: String? = null,
     @Serializable(with = FlexibleStringSerializer::class)
     val voteAverage: String? = null,
     val viewCount: Long = 0,
     val quality: String? = null,
+    val status: String? = null,
     val country: String? = null,
     val runtime: Int? = null,
+    val numberOfSeasons: Int? = null,
+    val numberOfEpisodes: Int? = null,
+    val trailerUrl: String? = null,
+    val networkLogoPath: String? = null,
     val originalLanguage: String? = null,
     val contentType: String = "movie",
     val genres: List<Genre> = emptyList(),
@@ -33,6 +52,22 @@ data class MovieItem(
 
     val fullBackdropUrl: String
         get() = if (backdropPath != null) "https://image.tmdb.org/t/p/w1280$backdropPath" else ""
+
+    val fullLogoUrl: String
+        get() = if (!logoPath.isNullOrBlank()) "https://image.tmdb.org/t/p/w500$logoPath" else ""
+
+    val fullNetworkLogoUrl: String
+        get() = if (!networkLogoPath.isNullOrBlank()) "https://image.tmdb.org/t/p/w300$networkLogoPath" else ""
+
+    val effectiveYear: String
+        get() = (releaseDate?.takeIf { it.length >= 4 } ?: firstAirDate?.takeIf { it.length >= 4 })?.take(4) ?: ""
+
+    val topRightBadge: String?
+        get() = when {
+            contentType == "tv_series" && (numberOfSeasons ?: 0) > 0 -> "S$numberOfSeasons"
+            !quality.isNullOrBlank() -> quality
+            else -> null
+        }
 
     val formattedRating: String
         get() = voteAverage?.toDoubleOrNull()?.let { String.format("%.1f", it) } ?: "N/A"

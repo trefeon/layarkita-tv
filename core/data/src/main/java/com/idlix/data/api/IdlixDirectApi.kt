@@ -5,8 +5,11 @@ import com.idlix.data.model.ClaimResponse
 import com.idlix.data.model.CollectionDetailResponse
 import com.idlix.data.model.CollectionListResponse
 import com.idlix.data.model.EpisodeResponse
+import com.idlix.data.model.Genre
 import com.idlix.data.model.GenreListResponse
+import com.idlix.data.model.HomepageData
 import com.idlix.data.model.MovieDetail
+import com.idlix.data.model.MovieItem
 import com.idlix.data.model.MovieListResponse
 import com.idlix.data.model.PlayInfoResponse
 import com.idlix.data.model.RedeemRequest
@@ -19,6 +22,17 @@ import com.idlix.data.net.IdlixDomainResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -125,6 +139,267 @@ fun isChallenge(statusCode: Int, bodyPeek: String): Boolean {
     return CHALLENGE_MARKERS.any { bodyPeek.contains(it, ignoreCase = true) }
 }
 
+private fun JsonElement?.asStringOrNull(): String? = when (this) {
+    null, is JsonNull -> null
+    is JsonPrimitive -> content.takeIf { it.isNotBlank() && it != "null" }
+    else -> null
+}
+
+private fun JsonElement?.asIntOrNull(): Int? = when (this) {
+    null, is JsonNull -> null
+    is JsonPrimitive -> intOrNull ?: content.toIntOrNull()
+    else -> null
+}
+
+private fun JsonElement?.asLongOrNull(): Long? = when (this) {
+    null, is JsonNull -> null
+    is JsonPrimitive -> longOrNull ?: content.toLongOrNull()
+    else -> null
+}
+
+private fun JsonElement?.asBooleanOrDefault(default: Boolean = true): Boolean = when (this) {
+    null, is JsonNull -> default
+    is JsonPrimitive -> booleanOrNull ?: content.toBooleanStrictOrNull() ?: default
+    else -> default
+}
+
+private fun parseHomepageItem(
+    el: JsonObject,
+    isFeatured: Boolean,
+    defaultContentType: String = "movie"
+): MovieItem {
+    val content = if (isFeatured) (el["content"] as? JsonObject ?: el) else (el["content"] as? JsonObject ?: el)
+
+    val id = content["id"]?.asStringOrNull() ?: el["id"]?.asStringOrNull().orEmpty()
+
+    val title = el["title"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+        ?: content["title"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+        ?: el["name"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+        ?: content["name"]?.asStringOrNull().orEmpty()
+
+    val slug = el["slug"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+        ?: content["slug"]?.asStringOrNull().orEmpty()
+
+    val posterPath = el["posterPath"]?.asStringOrNull()
+        ?: content["posterPath"]?.asStringOrNull()
+        ?: el["poster_path"]?.asStringOrNull()
+        ?: content["poster_path"]?.asStringOrNull()
+
+    val backdropPath = if (isFeatured) {
+        el["backdropOverride"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+            ?: el["backdropPath"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+            ?: content["backdropPath"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+            ?: el["backdrop_path"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+            ?: content["backdrop_path"]?.asStringOrNull()
+    } else {
+        content["backdropPath"]?.asStringOrNull()
+            ?: el["backdropPath"]?.asStringOrNull()
+            ?: content["backdrop_path"]?.asStringOrNull()
+            ?: el["backdrop_path"]?.asStringOrNull()
+    }
+
+    val logoPath = content["logoPath"]?.asStringOrNull()
+        ?: content["logo_path"]?.asStringOrNull()
+        ?: el["logoPath"]?.asStringOrNull()
+        ?: el["logo_path"]?.asStringOrNull()
+
+    val overview = if (isFeatured) {
+        el["description"]?.asStringOrNull()?.takeIf { it.isNotBlank() }
+            ?: content["overview"]?.asStringOrNull()
+            ?: el["overview"]?.asStringOrNull()
+            ?: content["description"]?.asStringOrNull()
+    } else {
+        content["overview"]?.asStringOrNull()
+            ?: el["overview"]?.asStringOrNull()
+            ?: content["description"]?.asStringOrNull()
+            ?: el["description"]?.asStringOrNull()
+    }
+
+    val tagline = content["tagline"]?.asStringOrNull() ?: el["tagline"]?.asStringOrNull()
+
+    val releaseDate = content["releaseDate"]?.asStringOrNull()
+        ?: content["release_date"]?.asStringOrNull()
+        ?: el["releaseDate"]?.asStringOrNull()
+        ?: el["release_date"]?.asStringOrNull()
+
+    val firstAirDate = content["firstAirDate"]?.asStringOrNull()
+        ?: content["first_air_date"]?.asStringOrNull()
+        ?: el["firstAirDate"]?.asStringOrNull()
+        ?: el["first_air_date"]?.asStringOrNull()
+
+    val voteAverage = (content["voteAverage"] ?: content["vote_average"] ?: el["voteAverage"] ?: el["vote_average"])
+        ?.asStringOrNull()
+
+    val viewCount = (content["viewCount"] ?: content["view_count"] ?: el["viewCount"] ?: el["view_count"])
+        ?.asLongOrNull() ?: 0L
+
+    val quality = content["quality"]?.asStringOrNull() ?: el["quality"]?.asStringOrNull()
+
+    val status = content["status"]?.asStringOrNull() ?: el["status"]?.asStringOrNull()
+
+    val country = content["country"]?.asStringOrNull() ?: el["country"]?.asStringOrNull()
+
+    val runtime = (content["runtime"] ?: content["duration"] ?: el["runtime"])?.asIntOrNull()
+
+    val numberOfSeasons = (content["numberOfSeasons"] ?: content["number_of_seasons"] ?: el["numberOfSeasons"] ?: el["number_of_seasons"])
+        ?.asIntOrNull()
+
+    val numberOfEpisodes = (content["numberOfEpisodes"] ?: content["number_of_episodes"] ?: el["numberOfEpisodes"] ?: el["number_of_episodes"])
+        ?.asIntOrNull()
+
+    val trailerUrl = content["trailerUrl"]?.asStringOrNull()
+        ?: content["trailer_url"]?.asStringOrNull()
+        ?: el["trailerUrl"]?.asStringOrNull()
+
+    val networkLogoPath = (content["networks"] as? JsonArray ?: el["networks"] as? JsonArray)
+        ?.firstOrNull()?.let { net ->
+            (net as? JsonObject)?.get("logo_path")?.asStringOrNull()
+                ?: (net as? JsonObject)?.get("logoPath")?.asStringOrNull()
+        } ?: content["networkLogoPath"]?.asStringOrNull()
+          ?: el["networkLogoPath"]?.asStringOrNull()
+          ?: content["network_logo_path"]?.asStringOrNull()
+          ?: el["network_logo_path"]?.asStringOrNull()
+
+    val originalLanguage = content["originalLanguage"]?.asStringOrNull()
+        ?: content["original_language"]?.asStringOrNull()
+        ?: el["originalLanguage"]?.asStringOrNull()
+
+    val rawContentType = el["contentType"]?.asStringOrNull()
+        ?: content["contentType"]?.asStringOrNull()
+        ?: el["content_type"]?.asStringOrNull()
+        ?: defaultContentType
+
+    val normalizedContentType = when {
+        rawContentType.equals("series", ignoreCase = true) ||
+            rawContentType.equals("tv_series", ignoreCase = true) ||
+            rawContentType.equals("tv", ignoreCase = true) -> "tv_series"
+        (numberOfSeasons ?: 0) > 0 -> "tv_series"
+        else -> "movie"
+    }
+
+    val rawGenres = (content["genres"] as? JsonArray) ?: (el["genres"] as? JsonArray)
+    val genres = rawGenres?.mapNotNull { g ->
+        when (g) {
+            is JsonObject -> {
+                val gId = g["id"]?.asStringOrNull().orEmpty()
+                val gName = g["name"]?.asStringOrNull().orEmpty()
+                val gSlug = g["slug"]?.asStringOrNull() ?: gName.lowercase()
+                Genre(id = gId, name = gName, slug = gSlug)
+            }
+            is JsonPrimitive -> {
+                val text = g.asStringOrNull()
+                if (!text.isNullOrBlank()) {
+                    Genre(id = text, name = text, slug = text.lowercase())
+                } else null
+            }
+            else -> null
+        }
+    } ?: emptyList()
+
+    val hasVideo = (content["hasVideo"] ?: el["hasVideo"])?.asBooleanOrDefault(true) ?: true
+
+    return MovieItem(
+        id = id,
+        title = title,
+        slug = slug,
+        posterPath = posterPath,
+        backdropPath = backdropPath,
+        logoPath = logoPath,
+        overview = overview,
+        tagline = tagline,
+        releaseDate = releaseDate ?: firstAirDate,
+        firstAirDate = firstAirDate ?: releaseDate,
+        voteAverage = voteAverage,
+        viewCount = viewCount,
+        quality = quality,
+        status = status,
+        country = country,
+        runtime = runtime,
+        numberOfSeasons = numberOfSeasons,
+        numberOfEpisodes = numberOfEpisodes,
+        trailerUrl = trailerUrl,
+        networkLogoPath = networkLogoPath,
+        originalLanguage = originalLanguage,
+        contentType = normalizedContentType,
+        genres = genres,
+        hasVideo = hasVideo
+    )
+}
+
+/**
+ * Parses the raw JSON response of `GET api/homepage` into [HomepageData].
+ * Tolerates schema shifts, missing sections, and varying field casing. Pure, unit-testable.
+ */
+internal fun parseHomepageJson(body: String): HomepageData {
+    val root = try {
+        CoreHttp.json.parseToJsonElement(body).jsonObject
+    } catch (_: Exception) {
+        return HomepageData()
+    }
+
+    val above = (root["above"] as? JsonArray)?.filterIsInstance<JsonObject>() ?: emptyList()
+    val below = (root["below"] as? JsonArray)?.filterIsInstance<JsonObject>() ?: emptyList()
+    val allSections = above + below
+
+    val featured = mutableListOf<MovieItem>()
+    val trendingNow = mutableListOf<MovieItem>()
+    val trendingCountry = mutableListOf<MovieItem>()
+    val networkOriginals = mutableListOf<MovieItem>()
+    val latestMovies = mutableListOf<MovieItem>()
+    val latestSeries = mutableListOf<MovieItem>()
+
+    var trendingSectionCount = 0
+
+    for (section in allSections) {
+        val type = section["type"]?.asStringOrNull().orEmpty()
+        val data = section["data"] as? JsonArray ?: continue
+
+        when (type) {
+            "featured" -> {
+                for (itemElem in data) {
+                    val el = itemElem as? JsonObject ?: continue
+                    featured.add(parseHomepageItem(el, isFeatured = true))
+                }
+            }
+            "trending" -> {
+                val targetList = if (trendingSectionCount == 0) trendingNow else trendingCountry
+                trendingSectionCount++
+                for (itemElem in data) {
+                    val el = itemElem as? JsonObject ?: continue
+                    targetList.add(parseHomepageItem(el, isFeatured = false))
+                }
+            }
+            "network" -> {
+                for (itemElem in data) {
+                    val el = itemElem as? JsonObject ?: continue
+                    networkOriginals.add(parseHomepageItem(el, isFeatured = false))
+                }
+            }
+            "latest_movies" -> {
+                for (itemElem in data) {
+                    val el = itemElem as? JsonObject ?: continue
+                    latestMovies.add(parseHomepageItem(el, isFeatured = false, defaultContentType = "movie"))
+                }
+            }
+            "latest_series" -> {
+                for (itemElem in data) {
+                    val el = itemElem as? JsonObject ?: continue
+                    latestSeries.add(parseHomepageItem(el, isFeatured = false, defaultContentType = "tv_series"))
+                }
+            }
+        }
+    }
+
+    return HomepageData(
+        featured = featured,
+        trendingNow = trendingNow,
+        trendingCountry = trendingCountry,
+        networkOriginals = networkOriginals,
+        latestMovies = latestMovies,
+        latestSeries = latestSeries
+    )
+}
+
 /**
  * Direct-source client for the live IDLIX mirror.
  *
@@ -136,6 +411,11 @@ fun isChallenge(statusCode: Int, bodyPeek: String): Boolean {
  * empty response without touching the network.
  */
 open class IdlixDirectApi {
+
+    open suspend fun getHomepage(): HomepageData = withContext(Dispatchers.IO) {
+        val body = getJson("api/homepage")
+        parseHomepageJson(body)
+    }
 
     open suspend fun getMovies(
         page: Int = 1,

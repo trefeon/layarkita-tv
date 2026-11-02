@@ -179,14 +179,21 @@ object MediaSourceHelper {
                 extensionRendererMode: Int,
                 out: ArrayList<Renderer>
             ) {
-                // Normalize cue line so SubtitleView.bottomPaddingFraction applies:
-                // it only affects cues with line == DIMEN_UNSET. Horizontal
-                // position/alignment are preserved.
+                // Normalize TEXT cue line so the screen-overlay bottom fraction
+                // applies: it only affects cues with line == DIMEN_UNSET.
+                // Horizontal position/alignment are preserved. Bitmap cues
+                // pass through untouched: the overlay is screen-sized, so
+                // their authored geometry scales to the screen and ZOOM
+                // never crops them; flattening their line would misplace them.
                 val normalizedOutput = TextOutput { cueGroup ->
                     output.onCues(
                         CueGroup(
                             cueGroup.cues.map { cue ->
-                                cue.buildUpon().setLine(Cue.DIMEN_UNSET, cue.lineType).build()
+                                if (cue.bitmap == null) {
+                                    cue.buildUpon().setLine(Cue.DIMEN_UNSET, cue.lineType).build()
+                                } else {
+                                    cue
+                                }
                             },
                             cueGroup.presentationTimeUs
                         )

@@ -1,7 +1,16 @@
 package com.idlix.tv.ui.navigation
 
+import android.app.Activity
+import android.content.Intent
 import android.view.KeyEvent
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -10,21 +19,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
-import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.navigation.NavType
+import androidx.navigation.navDeepLink
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.idlix.tv.MainActivity
 import com.idlix.tv.ui.components.TopBarTab
+import com.idlix.tv.ui.components.tvDpadFocusRecovery
+import com.idlix.tv.ui.theme.NetflixBlack
 import com.idlix.tv.ui.components.TvTopBar
 import com.idlix.tv.ui.components.TvTopBarHeight
 import com.idlix.tv.ui.screens.detail.DetailScreen
@@ -69,6 +85,7 @@ fun AppNavigation(
     // Same-card return from DevTools: Settings disposes under DevTools, so the
     // key lives here (mirrors the detail-swap hoisting above).
     var settingsRefocusKey by remember { mutableStateOf<String?>(null) }
+    var devToolsRefocusKey by remember { mutableStateOf<String?>(null) }
     var searchRefocusKey by remember { mutableStateOf<String?>(null) }
     var continueWatchingRefocusKey by remember { mutableStateOf<String?>(null) }
 
@@ -84,6 +101,13 @@ fun AppNavigation(
     val collectionDetailListState = rememberLazyListState()
     val searchGridState = rememberLazyGridState()
     val continueWatchingGridState = rememberLazyGridState()
+    // Column scroll states, hoisted for the same reason: Settings disposes
+    // under DevTools (and both dispose on detail/player), so a local
+    // rememberScrollState would reset to 0 and an off-screen return target
+    // would never recompose to take focus back. Return effects scroll these
+    // back before requesting focus.
+    val settingsScrollState = rememberScrollState()
+    val devToolsScrollState = rememberScrollState()
     // Rail states by "tab:railId", created on demand and stable thereafter.
     val railListStates = remember { mutableMapOf<String, LazyListState>() }
     val homeRailStates = remember { { railId: String -> railListStates.getOrPut("home:$railId") { LazyListState() } } }
@@ -93,16 +117,74 @@ fun AppNavigation(
     val collectionDetailRailStates = remember { { railId: String -> railListStates.getOrPut("collection:$railId") { LazyListState() } } }
 
     // Bar-to-content entry link: plain focus search dies crossing the
-    // floating-bar overlay boundary into LazyColumn content, so every tab/gear
+    // floating-bar overlay boundary into lazy content, so every tab/gear
     // DOWN targets this requester. Each bar-route screen attaches it to its
     // entry node (alongside its local requester) — one destination is composed
     // at a time, so the shared instance is unambiguous.
     val contentEntryLink = remember { FocusRequester() }
-    // Content-to-bar escape link: content scrolled under the transparent bar
-    // escapes preview-UP to the selected tab/gear via topEdgeBarEscape (plain
-    // UP search has no strictly-above candidate there). Attached by TvTopBar
-    // to the selected tab only — again one node at a time.
+    // Content-to-bar escape link: content under the floating bar escapes
+    // preview-UP to the selected tab/gear. Attached by TvTopBar to the
+    // selected tab only — again one node at a time.
     val barTabLink = remember { FocusRequester() }
+    // Cold-start deep link (idlix:// scheme, SEARCH intents): routed once the
+    // graph is composed. Warm intents while running re-deliver via
+    // MainActivity.onNewIntent → setIntent; the next cold start picks them up.
+    val context = LocalContext.current
+    val deepLinkIntent = remember {
+        (context as? Activity)?.intent?.takeIf { it.action == Intent.ACTION_VIEW }
+    }
+    LaunchedEffect(deepLinkIntent) {
+        val intent = deepLinkIntent ?: return@LaunchedEffect
+        try {
+            navController.handleDeepLink(intent)
+        } catch (_: Exception) {
+        }
+    }
+    // Voice-search + worker-update routing (see MainActivity): cold-start
+    // intents land before the graph composes (drained once below); warm
+    // intents re-deliver via onNewIntent → MainActivity dispatches to these
+    // listeners. SEARCH QUERY and play-from-search EXTRA_MEDIA_TITLE both
+    // land on Search via the initialQuery arg; the worker pending-update
+    // flag routes to Settings (payload rides PendingUpdateStore, consumed
+    // by SettingsViewModel on init).
+    val activity = context as? MainActivity
+    LaunchedEffect(navController) {
+        activity?.onSearchQuery = { query ->
+            navController.navigate(Screen.Search.createRoute(query)) {
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+        activity?.onPendingUpdate = {
+            navController.navigate(Screen.Settings.route) {
+                launchSingleTop = true
+            }
+        }
+        activity?.onDeepLink = { intent ->
+            try {
+                navController.handleDeepLink(intent)
+            } catch (_: Exception) {
+            }
+        }
+        activity?.drainPendingDeepLink()?.let { pending ->
+            try {
+                navController.handleDeepLink(pending)
+            } catch (_: Exception) {
+            }
+        }
+        val pending = activity?.drainPendingIntents()
+        val query = pending?.first
+        if (!query.isNullOrBlank()) {
+            navController.navigate(Screen.Search.createRoute(query)) {
+                launchSingleTop = true
+                restoreState = true
+            }
+        } else if (pending?.second == true) {
+            navController.navigate(Screen.Settings.route) {
+                launchSingleTop = true
+            }
+        }
+    }
     // Gamepad B mirrors system Back on routes where Back otherwise does
     // nothing for gamepads. Remote paths untouched.
     val gamepadBackHandler = Modifier.onKeyEvent { keyEvent ->
@@ -116,12 +198,24 @@ fun AppNavigation(
         } else false
     }
 
+    // Shell safe area: 48dp L/R + 27dp T/B content padding lives inside the
+    // screens (rails carry 48dp insets; the overscan floor is 32dp). The shell
+    // itself only honors the platform systemBars insets (overscan/status)
+    // and consumes them so children don't re-apply.
+    val shellInsets = Modifier
+        .windowInsetsPadding(WindowInsets.systemBars)
+        .consumeWindowInsets(WindowInsets.systemBars)
+
     if (isFullScreenRoute) {
         // Render without top bar
         NavHost(
             navController = navController,
             startDestination = Screen.Home.route,
-            modifier = modifier.then(gamepadBackHandler)
+            modifier = modifier
+                .background(NetflixBlack)
+                .then(shellInsets)
+                .then(gamepadBackHandler)
+                .tvDpadFocusRecovery(contentEntryLink)
         ) {
             setupNavRoutes(
                 navController,
@@ -133,6 +227,7 @@ fun AppNavigation(
                 genreDetailRefocusKey, { genreDetailRefocusKey = it },
                 collectionDetailRefocusKey, { collectionDetailRefocusKey = it },
                 settingsRefocusKey, { settingsRefocusKey = it },
+                devToolsRefocusKey, { devToolsRefocusKey = it },
                 searchRefocusKey, { searchRefocusKey = it },
                 continueWatchingRefocusKey, { continueWatchingRefocusKey = it },
                 homeListState, homeRailStates,
@@ -143,26 +238,28 @@ fun AppNavigation(
                 collectionDetailListState, collectionDetailRailStates,
                 searchGridState,
                 continueWatchingGridState,
+                settingsScrollState,
+                devToolsScrollState,
                 contentEntryLink, barTabLink
             )
         }
     } else {
-        // Non-fullscreen routes: content viewport starts BELOW the floating
-        // bar (settle guard STUCK-1). The bar still draws as a transparent
-        // overlay (web-style), but the NavHost no longer slides under it, so
-        // a focused card settled at the viewport top rests at window
-        // y≈TvTopBarHeight (below the tab zone y≈11–74) — plain UP search
-        // always has a strictly-above target and never dies from overlap.
-        // Screens keep their own 12dp top headroom for the focus ring, for a
-        // total bar+12dp rest below y≈80. Hero bleed under the bar is gone
-        // (art starts below the chrome) — focus reliability wins.
-        Box(modifier = modifier.then(gamepadBackHandler)) {
+        // Non-fullscreen routes: hero routes bleed all the way to the top edge (y = 0)
+        // behind the translucent TvTopBar, while non-hero routes stay padded below TvTopBarHeight.
+        val isHeroBleedRoute = currentRoute == Screen.Home.route || currentRoute == Screen.Movies.route || currentRoute == Screen.Series.route
+        Box(
+            modifier = modifier
+                .background(NetflixBlack)
+                .then(shellInsets)
+                .then(gamepadBackHandler)
+                .tvDpadFocusRecovery(contentEntryLink)
+        ) {
             NavHost(
                 navController = navController,
                 startDestination = Screen.Home.route,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = TvTopBarHeight)
+                    .padding(top = if (isHeroBleedRoute) 0.dp else TvTopBarHeight)
             ) {
                 setupNavRoutes(
                     navController,
@@ -174,6 +271,7 @@ fun AppNavigation(
                     genreDetailRefocusKey, { genreDetailRefocusKey = it },
                     collectionDetailRefocusKey, { collectionDetailRefocusKey = it },
                     settingsRefocusKey, { settingsRefocusKey = it },
+                    devToolsRefocusKey, { devToolsRefocusKey = it },
                     searchRefocusKey, { searchRefocusKey = it },
                     continueWatchingRefocusKey, { continueWatchingRefocusKey = it },
                     homeListState, homeRailStates,
@@ -184,6 +282,8 @@ fun AppNavigation(
                     collectionDetailListState, collectionDetailRailStates,
                     searchGridState,
                     continueWatchingGridState,
+                    settingsScrollState,
+                    devToolsScrollState,
                     contentEntryLink, barTabLink
                 )
             }
@@ -229,6 +329,8 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
     onCollectionDetailRefocusKeyChange: (String?) -> Unit,
     settingsRefocusKey: String?,
     onSettingsRefocusKeyChange: (String?) -> Unit,
+    devToolsRefocusKey: String?,
+    onDevToolsRefocusKeyChange: (String?) -> Unit,
     searchRefocusKey: String?,
     onSearchRefocusKeyChange: (String?) -> Unit,
     continueWatchingRefocusKey: String?,
@@ -246,6 +348,8 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
     collectionDetailRailStates: (String) -> LazyListState,
     searchGridState: LazyGridState,
     continueWatchingGridState: LazyGridState,
+    settingsScrollState: ScrollState,
+    devToolsScrollState: ScrollState,
     contentEntryLink: FocusRequester,
     barTabLink: FocusRequester
 ) {
@@ -270,6 +374,8 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
     }
 
     composable(Screen.ContinueWatching.route) {
+        // Tab root: consume system Back (scaffold-less route owns its handler).
+        BackHandler(enabled = true) { }
         ContinueWatchingScreen(
             onNavigateToPlayer = { type, id, title, poster, backdrop, slug, season, episode ->
                 navController.navigate(Screen.Player.createRoute(type, id, title, poster, backdrop, slug, season, episode))
@@ -321,11 +427,31 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
         )
     }
 
-    composable(Screen.Search.route) {
+    composable(
+        route = Screen.Search.route,
+        arguments = listOf(
+            navArgument("initialQuery") {
+                type = NavType.StringType
+                nullable = true
+                defaultValue = null
+            }
+        )
+    ) { backStackEntry ->
+        // Tab root: consume system Back (scaffold-less route owns its handler).
+        BackHandler(enabled = true) { }
+        val rawQuery = backStackEntry.arguments?.getString("initialQuery")
+        val initialQuery = rawQuery?.let {
+            try {
+                URLDecoder.decode(it, StandardCharsets.UTF_8.toString())
+            } catch (e: Exception) {
+                it
+            }
+        }?.takeIf { it.isNotBlank() }
         SearchScreen(
             onNavigateToDetail = { type, slug ->
                 navController.navigate(Screen.Detail.createRoute(type, slug))
             },
+            initialQuery = initialQuery,
             refocusKey = searchRefocusKey,
             onRefocusKeyChange = onSearchRefocusKeyChange,
             gridState = searchGridState,
@@ -335,6 +461,8 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
     }
 
     composable(Screen.Genres.route) {
+        // Tab root: consume system Back (scaffold-less route owns its handler).
+        BackHandler(enabled = true) { }
         GenresScreen(
             onNavigateToGenre = { slug, name ->
                 navController.navigate(Screen.GenreDetail.createRoute(slug, name))
@@ -416,21 +544,54 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
     }
 
     composable(Screen.Settings.route) {
+        // Tab root: consume system Back (scaffold-less route owns its handler).
+        BackHandler(enabled = true) { }
         SettingsScreen(
             entryLinkRequester = contentEntryLink,
             barLinkRequester = barTabLink,
             refocusKey = settingsRefocusKey,
             onRefocusKeyChange = onSettingsRefocusKeyChange,
+            scrollState = settingsScrollState,
             onOpenDevTools = { navController.navigate(Screen.DevTools.route) }
         )
     }
 
     composable(Screen.DevTools.route) {
+        // Child route: Back restores the Settings entry (same-card return
+        // parks on DevTools when the advanced section is still unlocked).
+        BackHandler {
+            onSettingsRefocusKeyChange("devtools")
+            navController.popBackStack()
+        }
         DevToolsScreen(
             currentRoute = currentRoute,
             entryLinkRequester = contentEntryLink,
             barLinkRequester = barTabLink,
-            onBack = { navController.popBackStack() }
+            refocusKey = devToolsRefocusKey,
+            onRefocusKeyChange = onDevToolsRefocusKeyChange,
+            scrollState = devToolsScrollState,
+            // Dummy-QA fixtures open the real error states (Retry + Back)
+            // with fake ids — no catalog dependence, nothing to clean up.
+            onOpenDummyDetail = { type, slug ->
+                navController.navigate(Screen.Detail.createRoute(type, slug))
+            },
+            onOpenDummyPlayer = { type, contentId ->
+                navController.navigate(
+                    Screen.Player.createRoute(
+                        contentType = type,
+                        contentId = contentId,
+                        title = "DUMMY fixture (invalid id)"
+                    )
+                )
+            },
+            // Same-card return: BACK parks on the DevTools entry card when
+            // the advanced section is still unlocked, else on the update
+            // entry (see SettingsScreen return effect; relock-on-leave
+            // usually hides the card, so the fallback is the norm).
+            onBack = {
+                onSettingsRefocusKeyChange("devtools")
+                navController.popBackStack()
+            }
         )
     }
 
@@ -439,8 +600,13 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
         arguments = listOf(
             navArgument("contentType") { type = NavType.StringType },
             navArgument("slug") { type = NavType.StringType }
-        )
+        ),
+        deepLinks = listOf(navDeepLink { uriPattern = "idlix://detail/{contentType}/{slug}" })
     ) { backStackEntry ->
+        // Child route: Back pops to the originating rail card. DetailScreen
+        // keeps its preview-key handler as the first consumer; this is the
+        // single dispatcher-level handler for the route.
+        BackHandler { navController.popBackStack() }
         val contentType = backStackEntry.arguments?.getString("contentType") ?: "movie"
         val slug = backStackEntry.arguments?.getString("slug") ?: ""
 
@@ -485,7 +651,10 @@ private fun androidx.navigation.NavGraphBuilder.setupNavRoutes(
                 nullable = true
                 defaultValue = ""
             }
-        )
+        ),
+        // idlix://player/<type>/<id>/<title>: query extras ride the intent;
+        // modal-first Back stays inside PlayerScreen (its own handler).
+        deepLinks = listOf(navDeepLink { uriPattern = "idlix://player/{contentType}/{contentId}/{title}" })
     ) { backStackEntry ->
         val contentType = backStackEntry.arguments?.getString("contentType") ?: "movie"
         val contentId = backStackEntry.arguments?.getString("contentId") ?: ""

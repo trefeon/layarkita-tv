@@ -398,12 +398,17 @@ fun TvPlayerControls(
                 }
             }
 
-            // Bottom Bar: Interactive Seeker Bar & Subtitle toggle
+            // Bottom Bar: translucent control strip over the video. State (pos /
+            // duration / buffered / labels) is fed from the MediaController poll
+            // in the host screen, so every value here already reflects the
+            // service player.
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = 48.dp, vertical = 24.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
                     .focusGroup()
             ) {
                 val targetPos = if (isSeekFocused) scrubPosMs else currentPosMs

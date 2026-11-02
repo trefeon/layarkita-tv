@@ -23,8 +23,8 @@ android {
         applicationId = "com.idlix.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.0.8"
+        versionCode = 11
+        versionName = "1.0.9"
         // No backend URL: direct-source via IdlixDomainResolver (https://idlix.net/ → live mirror).
         // SubDL key lives in core:data BuildConfig (local.properties subdlApiKey / SUBDL_API_KEY env).
 
@@ -131,6 +131,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.animation)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material.icons)
     debugImplementation(libs.androidx.compose.ui.tooling)
@@ -138,6 +139,8 @@ dependencies {
     // Android TV Compose (Netflix-style UI)
     implementation(libs.androidx.tv.foundation)
     implementation(libs.androidx.tv.material)
+    // Leanback launcher integration (Continue Watching channel + Watch Next)
+    implementation(libs.androidx.tvprovider)
 
     // Navigation
     implementation(libs.androidx.navigation.compose)
@@ -146,6 +149,7 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.exoplayer.hls)
     implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.ui.compose)
     implementation(libs.androidx.media3.session)
     implementation(libs.androidx.media3.common)
 
