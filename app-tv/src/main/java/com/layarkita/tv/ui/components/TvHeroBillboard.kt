@@ -40,11 +40,17 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -479,6 +485,7 @@ fun TvHeroBillboard(
             // Single Watch Now CTA matching z2.idlixku.com ([Image #1])
             val watchNowInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
             val isWatchNowHovered by watchNowInteraction.collectIsHoveredAsState()
+            val focusManager = LocalFocusManager.current
             Button(
                 onClick = { onPlayClick(display) },
                 interactionSource = watchNowInteraction,
@@ -486,6 +493,26 @@ fun TvHeroBillboard(
                     .focusRequester(playBtnRequester)
                     .onFocusChanged { isPlayFocused = it.isFocused }
                     .topEdgeBarEscape(barEscapeLink, force = true, onEscape = onBarEscape)
+                    // DOWN out of the hero mirrors the UP escape's imperative
+                    // shape (STUCK-1): requester-parked focus sessions veto
+                    // default-search transfers, so a bare declarative
+                    // down-link silently dies here. Release the session
+                    // first, then hop to the next rail's container link.
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown || event.key != Key.DirectionDown) {
+                            return@onPreviewKeyEvent false
+                        }
+                        if (downLink == null) return@onPreviewKeyEvent false
+                        try {
+                            try {
+                                focusManager.clearFocus(force = true)
+                            } catch (_: Exception) {}
+                            downLink.requestFocus()
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
+                    }
                     // Black halo OUTSIDE the white focus ring: on bright
                     // backdrops the white ring alone washes out (proven by
                     // crop_play.png). B&W only, zero layout churn.

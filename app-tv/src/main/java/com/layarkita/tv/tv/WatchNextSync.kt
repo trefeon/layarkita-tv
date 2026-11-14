@@ -238,7 +238,7 @@ object WatchNextSync {
 
     // ------------------------------------------------------------- helpers
 
-    private fun namespaced(contentId: String): String = "layarkita:\$contentId"
+    private fun namespaced(contentId: String): String = "layarkita:$contentId"
 
     private fun watchNextType(contentType: String): Int = when (contentType) {
         "movie" -> TvContract.WatchNextPrograms.TYPE_MOVIE

@@ -42,6 +42,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -102,6 +103,7 @@ fun <T> TvRailShell(
 
     val outerListState = LocalTvOuterListState.current
     val railScope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     var lastFocusedIndex by rememberSaveable(rowId) { mutableIntStateOf(0) }
     val cardRequesters = remember { mutableMapOf<Int, FocusRequester>() }
     val restorerFallbackRequester = remember { FocusRequester() }
@@ -227,6 +229,13 @@ fun <T> TvRailShell(
                                     if (upLink != null) {
                                         var success = false
                                         try {
+                                            // STUCK-1: release the held focus
+                                            // session first — a bare hop out
+                                            // of a requester-parked card can
+                                            // be vetoed and silently no-op.
+                                            try {
+                                                focusManager.clearFocus(force = true)
+                                            } catch (_: Exception) {}
                                             upLink.requestFocus()
                                             success = true
                                         } catch (_: Exception) {
@@ -254,6 +263,11 @@ fun <T> TvRailShell(
                                     } else {
                                         var success = false
                                         try {
+                                            // STUCK-1: release the held focus
+                                            // session first (mirror of UP).
+                                            try {
+                                                focusManager.clearFocus(force = true)
+                                            } catch (_: Exception) {}
                                             downLink.requestFocus()
                                             success = true
                                         } catch (_: Exception) {
