@@ -66,10 +66,9 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class IdlixRepository(
     private val api: IdlixDirectApi = IdlixDirectApi(),
-    private val cache: DirectSourceCache = DirectSourceCache()
+    private val cache: DirectSourceCache = DirectSourceCache(),
+    private val movyResolver: MovyStreamResolver = MovyStreamResolver()
 ) {
-
-    private val movyResolver = MovyStreamResolver()
 
     // ------------------------------------------------------------ catalog
 
@@ -315,7 +314,6 @@ class IdlixRepository(
                     runCatching { getMovieDetail(s) }.getOrNull()
                 } ?: runCatching { getMovieDetail(targetId) }.getOrNull()
                 val tmdbId = movie?.tmdbId
-                android.util.Log.d("MovyResolver", "hook: targetType=$targetType targetId=$targetId slug=$slug tmdbId=$tmdbId title=${movie?.title}")
                 if (tmdbId != null && tmdbId > 0) {
                     val year = movie.releaseDate?.take(4)?.toIntOrNull()
                     val movyTitle = movie.originalTitle?.takeIf { it.isNotBlank() }

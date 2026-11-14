@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit
  * Seattle carries EN SRT. First provider that yields sources wins; a null
  * result means "no coverage" and callers fall back to the IDLIX gate flow.
  */
-class MovyStreamResolver(
+open class MovyStreamResolver(
     private val client: OkHttpClient = defaultClient(),
     private val base: String = "https://api.wecollege.net"
 ) {
@@ -43,7 +43,7 @@ class MovyStreamResolver(
      * Resolves one movie against the CDN. Returns null when no provider
      * covers the title (caller falls back); throws nothing outward.
      */
-    suspend fun resolveMovie(
+    open suspend fun resolveMovie(
         title: String,
         year: Int?,
         tmdbId: Long,
