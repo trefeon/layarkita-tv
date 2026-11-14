@@ -48,6 +48,7 @@ import com.layarkita.tv.ui.components.TvErrorState
 import com.layarkita.tv.ui.components.TvLoadingSpinner
 import com.layarkita.tv.ui.components.TvSizing
 import com.layarkita.tv.ui.components.topEdgeBarEscape
+import com.layarkita.tv.ui.components.tvArrowsViaMoveFocus
 import com.layarkita.tv.ui.components.tvGridColumnCount
 import com.layarkita.tv.ui.components.tvGridFocusFrame
 import com.layarkita.tv.ui.components.tvMatrixNeighbors
@@ -248,11 +249,20 @@ fun GenresScreen(
                                             } catch (_: Exception) {}
                                         }
                                     )
+                                    // All four arrows via moveFocus: tile focus
+                                    // arrives requester-parked (bar DOWN / entry
+                                    // park), which vetoes implicit default-search
+                                    // (STUCK-1). topEdgeBarEscape above still sees
+                                    // UP first on first-row tiles.
+                                    .tvArrowsViaMoveFocus()
                                     .focusProperties {
-                                        up = if (nav.isFirstRow) (barLinkRequester ?: FocusRequester.Cancel) else (nav.upIndex?.let { tileRequesters[it] } ?: FocusRequester.Default)
-                                        down = if (nav.downIndex == null) FocusRequester.Cancel else (tileRequesters[nav.downIndex] ?: FocusRequester.Default)
-                                        left = if (nav.leftIndex == null) FocusRequester.Cancel else (tileRequesters[nav.leftIndex] ?: FocusRequester.Default)
-                                        right = if (nav.rightIndex == null) FocusRequester.Cancel else (tileRequesters[nav.rightIndex] ?: FocusRequester.Default)
+                                        // Sibling-tile requester redirects poison
+                                        // the node (STUCK-1 class) — geometric
+                                        // default search handles the grid natively.
+                                        up = if (nav.isFirstRow) (barLinkRequester ?: FocusRequester.Cancel) else FocusRequester.Default
+                                        down = if (nav.downIndex == null) FocusRequester.Cancel else FocusRequester.Default
+                                        left = if (nav.leftIndex == null) FocusRequester.Cancel else FocusRequester.Default
+                                        right = if (nav.rightIndex == null) FocusRequester.Cancel else FocusRequester.Default
                                     }
                             ) {
                                 Text(

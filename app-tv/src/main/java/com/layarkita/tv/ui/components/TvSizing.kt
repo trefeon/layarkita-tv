@@ -13,6 +13,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.Offset
@@ -131,7 +132,8 @@ fun tvDetailHeaderHeight(): Dp {
 @OptIn(ExperimentalFoundationApi::class)
 fun Modifier.tvFocusFrame(
     horizontalPadding: Dp = 0.dp,
-    verticalPadding: Dp = 0.dp
+    verticalPadding: Dp = 0.dp,
+    attachResponder: Boolean = true
 ): Modifier = composed {
     var myRect by remember { mutableStateOf(Rect.Zero) }
     val responder = remember {
@@ -146,19 +148,28 @@ fun Modifier.tvFocusFrame(
             }
         }
     }
-    this
+    val base = this
         .onSizeChanged { myRect = Rect(Offset.Zero, it.toSize()) }
-        .bringIntoViewResponder(responder)
-        .padding(horizontal = horizontalPadding, vertical = verticalPadding)
+    val withResponder = if (attachResponder) {
+        // Synchronous rect-reporting responder: scroll lands on the padded
+        // wrapper in one pass (the original shake fix). ONLY safe on nodes
+        // without sibling card transfers — on rail/grid cards the responder
+        // vetoes sibling focus moves (rollback on bring-into-view), so those
+        // pass attachResponder = false.
+        base.bringIntoViewResponder(responder)
+    } else {
+        base
+    }
+    withResponder.padding(horizontal = horizontalPadding, vertical = verticalPadding)
 }
 
 fun Modifier.railFocusFrame(): Modifier =
-    tvFocusFrame(horizontalPadding = TvSizing.RailFocusHorizontal, verticalPadding = 0.dp)
+    tvFocusFrame(horizontalPadding = TvSizing.RailFocusHorizontal, verticalPadding = 0.dp, attachResponder = false)
 
 fun Modifier.tvGridFocusFrame(
     horizontalPadding: Dp = 0.dp,
     verticalPadding: Dp = 10.dp
-): Modifier = tvFocusFrame(horizontalPadding = horizontalPadding, verticalPadding = verticalPadding)
+): Modifier = tvFocusFrame(horizontalPadding = horizontalPadding, verticalPadding = verticalPadding, attachResponder = false)
 
 /**
  * Top-edge bar escape for scrollable TV content under the floating bar.
@@ -285,6 +296,40 @@ fun Modifier.tvDpadFocusRecovery(fallback: FocusRequester?): Modifier = composed
                 } catch (_: Exception) {
                     false
                 }
+            }
+            else -> false
+        }
+    }
+}
+
+/**
+ * Arrow keys re-dispatched through [FocusManager.moveFocus].
+ *
+ * Requester-parked focus sessions (STUCK-1) veto the implicit default-search
+ * and declarative neighbor redirects that the framework's own D-pad handling
+ * performs — arrows then die and the root recovery re-parks the entry node.
+ * moveFocus runs the framework transfer machinery and HONORS declarative
+ * redirects and edge Cancels, so arrows work again. Apply OUTSIDE any
+ * explicit UP/DOWN key handlers (outer in the chain) so their imperative
+ * hops still win first; this modifier only re-dispatches directions that
+ * reached it unconsumed.
+ */
+fun Modifier.tvArrowsViaMoveFocus(): Modifier = composed {
+    val focusManager = LocalFocusManager.current
+    this.onPreviewKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        when (event.key) {
+            Key.DirectionUp -> {
+                focusManager.moveFocus(FocusDirection.Up); true
+            }
+            Key.DirectionDown -> {
+                focusManager.moveFocus(FocusDirection.Down); true
+            }
+            Key.DirectionLeft -> {
+                focusManager.moveFocus(FocusDirection.Left); true
+            }
+            Key.DirectionRight -> {
+                focusManager.moveFocus(FocusDirection.Right); true
             }
             else -> false
         }

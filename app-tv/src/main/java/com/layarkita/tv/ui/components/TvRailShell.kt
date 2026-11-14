@@ -207,10 +207,7 @@ fun <T> TvRailShell(
                 }
                 val isLast = index == items.lastIndex
                 Box(
-                    Modifier.tvFocusFrame(
-                        horizontalPadding = TvSizing.RailFocusHorizontal,
-                        verticalPadding = TvSizing.RailFocusVertical
-                    )
+                    Modifier.railFocusFrame()
                 ) {
                     val cardModifier = Modifier
                         .focusRequester(cardFocusRequester)
@@ -219,8 +216,12 @@ fun <T> TvRailShell(
                         .focusProperties {
                             if (upLink != null) up = upLink
                             down = downLink ?: FocusRequester.Cancel
-                            left = if (index == 0) FocusRequester.Cancel else (cardRequesters[index - 1] ?: FocusRequester.Default)
-                            right = if (isLast) FocusRequester.Cancel else (cardRequesters[index + 1] ?: FocusRequester.Default)
+                            // Sibling-card requester redirects POISON the node
+                            // (all outgoing transfers die — STUCK-1 class);
+                            // geometric default search handles LEFT/RIGHT
+                            // natively, so only the edge cancels stay.
+                            left = if (index == 0) FocusRequester.Cancel else FocusRequester.Default
+                            right = if (isLast) FocusRequester.Cancel else FocusRequester.Default
                         }
                         .onPreviewKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -255,6 +256,40 @@ fun <T> TvRailShell(
                                         true
                                     } else {
                                         false
+                                    }
+                                }
+                                Key.DirectionLeft -> {
+                                    // Direct sibling-card requester hops fail
+                                    // (STUCK-1 class). Scroll the neighbor fully
+                                    // into view FIRST, then hop — the proven
+                                    // UP-retry pattern.
+                                    if (index == 0) {
+                                        true
+                                    } else {
+                                        lastFocusedIndex = index - 1
+                                        railScope.launch {
+                                            try {
+                                                listState.scrollToItem(index - 1)
+                                                withFrameNanos {}
+                                                cardRequesters[index - 1]?.requestFocus()
+                                            } catch (_: Exception) {}
+                                        }
+                                        true
+                                    }
+                                }
+                                Key.DirectionRight -> {
+                                    if (isLast) {
+                                        true
+                                    } else {
+                                        lastFocusedIndex = index + 1
+                                        railScope.launch {
+                                            try {
+                                                listState.scrollToItem(index + 1)
+                                                withFrameNanos {}
+                                                cardRequesters[index + 1]?.requestFocus()
+                                            } catch (_: Exception) {}
+                                        }
+                                        true
                                     }
                                 }
                                 Key.DirectionDown -> {

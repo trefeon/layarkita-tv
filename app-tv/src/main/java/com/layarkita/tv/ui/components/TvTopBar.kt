@@ -22,11 +22,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -35,12 +38,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
+import kotlinx.coroutines.launch
 import com.layarkita.tv.R
 import com.layarkita.tv.ui.theme.NetflixBlack
 import com.layarkita.tv.ui.theme.NetflixDarkGray
@@ -159,10 +164,8 @@ fun TvTopBar(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 for ((index, tab) in tabs.withIndex()) {
-                    val isFirst = index == 0
-                    val isLast = index == tabs.lastIndex
-                    val leftRequester = if (isFirst) FocusRequester.Cancel else tabRequesters[index - 1]
-                    val rightRequester = if (isLast) gearRequester else tabRequesters[index + 1]
+                    val leftRequester = if (index == 0) FocusRequester.Cancel else tabRequesters[index - 1]
+                    val rightRequester = if (index == tabs.lastIndex) gearRequester else tabRequesters[index + 1]
 
                     TopBarTabItem(
                         tab = tab,
@@ -208,6 +211,7 @@ private fun TopBarTabItem(
     val hovered by tabInteraction.collectIsHoveredAsState()
     val isActive = focused || hovered
     val textColor = if (selected || isActive) NetflixWhite else NetflixLightGray
+    val focusManager = LocalFocusManager.current
 
     val pillModifier = when {
         isActive -> Modifier
@@ -246,16 +250,25 @@ private fun TopBarTabItem(
                 right = rightRequester
             }
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                    val target = downFocusRequester ?: return@onPreviewKeyEvent false
-                    try {
-                        target.requestFocus()
-                        true
-                    } catch (_: Exception) {
-                        false
+                // Bar-to-bar requester hops (requestFocus on tab nodes) are
+                // silently vetoed by the held-session quirk (STUCK-1) —
+                // moveFocus runs the framework's own transfer machinery and
+                // honors the declarative neighbor redirect, so it works.
+                // Cancel edges (Home's LEFT, gear's RIGHT) hold in place.
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionDown -> {
+                        val target = downFocusRequester ?: return@onPreviewKeyEvent false
+                        try {
+                            target.requestFocus()
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
                     }
-                } else {
-                    false
+                    Key.DirectionLeft -> focusManager.moveFocus(FocusDirection.Left)
+                    Key.DirectionRight -> focusManager.moveFocus(FocusDirection.Right)
+                    else -> false
                 }
             }
             .padding(horizontal = 14.dp, vertical = 6.dp),
@@ -285,6 +298,7 @@ private fun SettingsGear(
     val hovered by gearInteraction.collectIsHoveredAsState()
     val isActive = focused || hovered
     val tint = if (selected || isActive) NetflixWhite else NetflixLightGray
+    val focusManager = LocalFocusManager.current
 
     Box(
         modifier = Modifier
@@ -315,16 +329,22 @@ private fun SettingsGear(
                 right = FocusRequester.Cancel
             }
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                    val target = downFocusRequester ?: return@onPreviewKeyEvent false
-                    try {
-                        target.requestFocus()
-                        true
-                    } catch (_: Exception) {
-                        false
+                // Same moveFocus walk as the tabs (requester hops are vetoed);
+                // LEFT lands on the Library tab via the declarative redirect,
+                // RIGHT is Cancel and holds.
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionDown -> {
+                        val target = downFocusRequester ?: return@onPreviewKeyEvent false
+                        try {
+                            target.requestFocus()
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
                     }
-                } else {
-                    false
+                    Key.DirectionLeft -> focusManager.moveFocus(FocusDirection.Left)
+                    else -> false
                 }
             }
             .padding(8.dp),
