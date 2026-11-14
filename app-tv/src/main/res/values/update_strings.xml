@@ -12,7 +12,7 @@
     <string name="update_failed">Update check failed: %1$s</string>
     <string name="update_retry">Retry</string>
     <string name="update_channel_name">App updates</string>
-    <string name="update_channel_desc">Notifications when a new IDLIX TV release is available</string>
+    <string name="update_channel_desc">Notifications when a new LayarKita release is available</string>
     <string name="update_err_http">Server error (HTTP %1$d)</string>
     <string name="update_err_empty">Empty release response</string>
     <string name="update_err_bad_data">Bad release data</string>

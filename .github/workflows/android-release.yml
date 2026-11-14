@@ -63,7 +63,7 @@ jobs:
             find app-tv/build/outputs -name '*.apk' || true
             exit 1
           fi
-          cp "$apk" "dist/idlix-tv-${TAG}.apk"
+          cp "$apk" "dist/layarkita-tv-${TAG}.apk"
           ls -la dist
 
       - name: Upload APK artifacts

@@ -1,12 +1,12 @@
-# IDLIX for Android TV
+# LayarKita for Android TV
 
-[![Release](https://img.shields.io/github/v/release/trefeon/idlix-tv)](https://github.com/trefeon/idlix-tv/releases)
-[![CI](https://github.com/trefeon/idlix-tv/actions/workflows/android-ci.yml/badge.svg)](https://github.com/trefeon/idlix-tv/actions/workflows/android-ci.yml)
-[![License](https://img.shields.io/github/license/trefeon/idlix-tv)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/trefeon/layarkita-tv)](https://github.com/trefeon/layarkita-tv/releases)
+[![CI](https://github.com/trefeon/layarkita-tv/actions/workflows/android-ci.yml/badge.svg)](https://github.com/trefeon/layarkita-tv/actions/workflows/android-ci.yml)
+[![License](https://img.shields.io/github/license/trefeon/layarkita-tv)](./LICENSE)
 
-A modern, **100% native Android TV streaming client** for movies and TV series from IDLIX — Leanback UI, hardware decoding via Media3 ExoPlayer, and in-app auto-updates. No backend to run, no account needed.
+A modern, **100% native Android TV streaming client** for movies and TV series from the IDLIX catalog — Leanback UI, hardware decoding via Media3 ExoPlayer, and in-app auto-updates. No backend to run, no account needed.
 
-> **New here?** Grab the latest APK from [Releases](https://github.com/trefeon/idlix-tv/releases) and follow the [installation guide](./TV_INSTALLATION_GUIDE.md) — no computer required.
+> **New here?** Grab the latest APK from [Releases](https://github.com/trefeon/layarkita-tv/releases) and follow the [installation guide](./TV_INSTALLATION_GUIDE.md) — no computer required.
 
 ---
 
@@ -32,7 +32,7 @@ A modern, **100% native Android TV streaming client** for movies and TV series f
 
 ## Install
 
-1. Download `idlix-tv-v*.apk` from the [releases page](https://github.com/trefeon/idlix-tv/releases).
+1. Download `layarkita-tv-v*.apk` from the [releases page](https://github.com/trefeon/layarkita-tv/releases).
 2. Follow **[TV_INSTALLATION_GUIDE.md](./TV_INSTALLATION_GUIDE.md)** — three sideload methods (phone transfer, USB stick, direct download), written for non-technical users.
 3. On first launch the app resolves the current mirror automatically; if a check fails, see *Troubleshooting* in the guide.
 
@@ -45,8 +45,8 @@ A modern, **100% native Android TV streaming client** for movies and TV series f
 **Prerequisites:** JDK 21, Android SDK (API 35), ~4 GB free disk.
 
 ```bash
-git clone https://github.com/trefeon/idlix-tv.git
-cd idlix-tv
+git clone https://github.com/trefeon/layarkita-tv.git
+cd layarkita-tv
 cp local.properties.sample local.properties   # then fill in your values
 ./gradlew :app-tv:assembleDebug                # debug APK
 ./gradlew :app-tv:assembleRelease              # release APK (signed if a keystore is configured, else unsigned)
@@ -74,7 +74,7 @@ Run the checks before pushing: `./gradlew :core:data:testDebugUnitTest :app-tv:t
 ## Project structure
 
 ```
-idlix-tv/
+layarkita-tv/
 ├── core/data/        # Shared library: HTTP client, idlix.net resolver, models,
 │                      # repositories, SubDL client, watch-history store
 ├── app-tv/           # Android TV app: Leanback UI, player, settings, updater, self-heal

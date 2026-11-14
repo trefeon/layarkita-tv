@@ -15,7 +15,7 @@ val localProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.idlix.data"
+    namespace = "com.layarkita.data"
     compileSdk = 35
 
     defaultConfig {
