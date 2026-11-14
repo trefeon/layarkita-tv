@@ -23,7 +23,9 @@ data class ResolvedPlayback(
     val hlsMasterUrl: String = "",
     val subtitles: List<SubtitleTrack> = emptyList(),
     val durationSec: Long = 0L,
-    val videoId: String = ""
+    val videoId: String = "",
+    /** Stream origin for playback Referer/Origin headers; blank = IDLIX mirror. */
+    val sourceOrigin: String = ""
 )
 
 /**

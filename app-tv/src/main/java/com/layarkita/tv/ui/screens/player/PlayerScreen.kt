@@ -596,7 +596,7 @@ fun PlayerScreen(
             val controllerReady = controller
 
             fun applySubtitleTrack(track: com.layarkita.data.model.SubtitleTrack?) {
-                sessionManager.rebuildSubtitleSource(resolved.hlsMasterUrl, track)
+                sessionManager.rebuildSubtitleSource(resolved.hlsMasterUrl, track, resolved.sourceOrigin.ifBlank { null })
             }
 
             // Prepare once per resolved stream when the controller is ready.
@@ -611,6 +611,7 @@ fun PlayerScreen(
                     speed = selectedSpeed,
                     audioLanguage = selectedAudioLang,
                     stabilizerEnabled = stabilizerEnabled,
+                    sourceOrigin = resolved.sourceOrigin.ifBlank { null },
                 )
             }
 

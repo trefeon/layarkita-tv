@@ -122,6 +122,7 @@ class PlaybackService : MediaSessionService() {
         speed: TvPlaybackSpeed,
         audioLanguage: String?,
         stabilizerEnabled: Boolean,
+        sourceOrigin: String? = null,
     ) {
         val player = currentPlayer ?: return
         val tokenQuery = try {
@@ -129,7 +130,7 @@ class PlaybackService : MediaSessionService() {
         } catch (_: Exception) {
             ""
         }
-        val httpFactory = MediaSourceHelper.createHttpDataSourceFactory(tokenQuery)
+        val httpFactory = MediaSourceHelper.createHttpDataSourceFactory(tokenQuery, sourceOrigin)
         player.setMediaSource(
             MediaSourceHelper.buildMediaSource(this, masterUrl, subtitle, httpFactory)
         )
@@ -158,14 +159,14 @@ class PlaybackService : MediaSessionService() {
      * Rebuilds the HLS+subtitle merge around [subtitle] preserving the exact
      * position/play state (subtitle picker path; no full [prepareStream]).
      */
-    fun rebuildSubtitleSource(masterUrl: String, subtitle: SubtitleTrack?) {
+    fun rebuildSubtitleSource(masterUrl: String, subtitle: SubtitleTrack?, sourceOrigin: String? = null) {
         val player = currentPlayer ?: return
         val tokenQuery = try {
             Uri.parse(masterUrl).query.orEmpty()
         } catch (_: Exception) {
             ""
         }
-        val httpFactory = MediaSourceHelper.createHttpDataSourceFactory(tokenQuery)
+        val httpFactory = MediaSourceHelper.createHttpDataSourceFactory(tokenQuery, sourceOrigin)
         val pos = player.currentPosition
         val wasPlaying = player.isPlaying
         player.setMediaSource(

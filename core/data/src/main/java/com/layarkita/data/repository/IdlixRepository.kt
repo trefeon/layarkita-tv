@@ -22,6 +22,7 @@ import com.layarkita.data.model.SeriesDetail
 import com.layarkita.data.model.SeriesItem
 import com.layarkita.data.model.SeriesListResponse
 import com.layarkita.data.net.CoreHttp
+import com.layarkita.data.movystream.MovyStreamResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -67,6 +68,8 @@ class IdlixRepository(
     private val api: IdlixDirectApi = IdlixDirectApi(),
     private val cache: DirectSourceCache = DirectSourceCache()
 ) {
+
+    private val movyResolver = MovyStreamResolver()
 
     // ------------------------------------------------------------ catalog
 
@@ -292,6 +295,23 @@ class IdlixRepository(
                     targetId = firstEp.id
                 } else {
                     return Result.failure(Exception("Tidak ada episode yang tersedia untuk serial ini."))
+                }
+            }
+
+            // Primary source: movy.sx CDN — no gate, no account, up to 2160p,
+            // Indonesian sidecar subs. Falls back to the IDLIX guest gate
+            // flow when the title has no TMDB mapping or CDN coverage.
+            if (targetType == "movie") {
+                val movie = runCatching { getMovieDetail(targetId) }.getOrNull()
+                val tmdbId = movie?.tmdbId
+                if (tmdbId != null && tmdbId > 0) {
+                    val year = movie.releaseDate?.take(4)?.toIntOrNull()
+                    val movyTitle = movie.originalTitle?.takeIf { it.isNotBlank() }
+                        ?: movie.title.ifBlank { contentTitle }
+                    val movy = runCatching {
+                        movyResolver.resolveMovie(movyTitle, year, tmdbId, movie.imdbId)
+                    }.getOrNull()
+                    if (movy != null) return Result.success(movy)
                 }
             }
 

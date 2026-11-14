@@ -91,6 +91,7 @@ class PlayerSessionManager(appContext: Context) {
         speed: TvPlaybackSpeed,
         audioLanguage: String?,
         stabilizerEnabled: Boolean,
+        sourceOrigin: String? = null,
     ) {
         try {
             PlaybackService.currentService()?.prepareStream(
@@ -100,16 +101,17 @@ class PlayerSessionManager(appContext: Context) {
                 quality = quality,
                 speed = speed,
                 audioLanguage = audioLanguage,
-                stabilizerEnabled = stabilizerEnabled
+                stabilizerEnabled = stabilizerEnabled,
+                sourceOrigin = sourceOrigin
             )
         } catch (_: Exception) {
         }
     }
 
-    fun rebuildSubtitleSource(masterUrl: String, subtitle: SubtitleTrack?) {
+    fun rebuildSubtitleSource(masterUrl: String, subtitle: SubtitleTrack?, sourceOrigin: String? = null) {
         try {
             PlaybackService.currentService()
-                ?.rebuildSubtitleSource(masterUrl, subtitle)
+                ?.rebuildSubtitleSource(masterUrl, subtitle, sourceOrigin)
         } catch (_: Exception) {
         }
     }

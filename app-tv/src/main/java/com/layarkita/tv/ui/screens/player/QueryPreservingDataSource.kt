@@ -83,7 +83,7 @@ class QueryPreservingDataSourceFactory(
 @OptIn(UnstableApi::class)
 object MediaSourceHelper {
 
-    fun createHttpDataSourceFactory(tokenQuery: String): DataSource.Factory {
+    fun createHttpDataSourceFactory(tokenQuery: String, sourceOrigin: String? = null): DataSource.Factory {
         val baseHttp = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
             // TV keeps longer 8s timeouts (vs 5s on mobile): the TV backlog is
@@ -93,10 +93,18 @@ object MediaSourceHelper {
             .setConnectTimeoutMs(8000)
             .setReadTimeoutMs(8000)
             .setDefaultRequestProperties(
-                mapOf(
-                    "Referer" to IdlixDomainResolver.referer(),
-                    "Origin" to IdlixDomainResolver.origin()
-                )
+                if (sourceOrigin.isNullOrBlank()) {
+                    mapOf(
+                        "Referer" to IdlixDomainResolver.referer(),
+                        "Origin" to IdlixDomainResolver.origin()
+                    )
+                } else {
+                    // movy CDN: openresty 403s without the movy.sx pair.
+                    mapOf(
+                        "Referer" to "$sourceOrigin/",
+                        "Origin" to sourceOrigin
+                    )
+                }
             )
         return QueryPreservingDataSourceFactory(baseHttp, tokenQuery)
     }
