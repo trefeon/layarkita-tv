@@ -224,13 +224,6 @@ fun <T> TvRailShell(
                             right = if (isLast) FocusRequester.Cancel else FocusRequester.Default
                         }
                         .onPreviewKeyEvent { event ->
-                            // UP is imperative (container hop with scroll-assist).
-                            // LEFT/RIGHT/DOWN are deliberately NOT consumed here:
-                            // their declarative redirects work through the
-                            // framework's moveFocus, while imperative
-                            // requestFocus hops from parked cards silently fail
-                            // AND consuming the key blocks the framework path
-                            // (the v1.1.0 rail-walk regression).
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                             when (event.key) {
                                 Key.DirectionUp -> {
@@ -263,6 +256,70 @@ fun <T> TvRailShell(
                                         true
                                     } else {
                                         false
+                                    }
+                                }
+                                Key.DirectionLeft -> {
+                                    // Direct sibling-card requester hops fail
+                                    // (STUCK-1 class). Scroll the neighbor fully
+                                    // into view FIRST, then hop — the proven
+                                    // UP-retry pattern.
+                                    if (index == 0) {
+                                        true
+                                    } else {
+                                        lastFocusedIndex = index - 1
+                                        railScope.launch {
+                                            try {
+                                                listState.scrollToItem(index - 1)
+                                                withFrameNanos {}
+                                                cardRequesters[index - 1]?.requestFocus()
+                                            } catch (_: Exception) {}
+                                        }
+                                        true
+                                    }
+                                }
+                                Key.DirectionRight -> {
+                                    if (isLast) {
+                                        true
+                                    } else {
+                                        lastFocusedIndex = index + 1
+                                        railScope.launch {
+                                            try {
+                                                listState.scrollToItem(index + 1)
+                                                withFrameNanos {}
+                                                cardRequesters[index + 1]?.requestFocus()
+                                            } catch (_: Exception) {}
+                                        }
+                                        true
+                                    }
+                                }
+                                Key.DirectionDown -> {
+                                    if (downLink == null) {
+                                        true
+                                    } else {
+                                        var success = false
+                                        try {
+                                            // STUCK-1: release the held focus
+                                            // session first (mirror of UP).
+                                            try {
+                                                focusManager.clearFocus(force = true)
+                                            } catch (_: Exception) {}
+                                            downLink.requestFocus()
+                                            success = true
+                                        } catch (_: Exception) {
+                                            success = false
+                                        }
+                                        if (!success && outerListState != null) {
+                                            railScope.launch {
+                                                try {
+                                                    outerListState.scrollToItem(
+                                                        outerListState.firstVisibleItemIndex + 1
+                                                    )
+                                                    withFrameNanos {}
+                                                    downLink.requestFocus()
+                                                } catch (_: Exception) {}
+                                            }
+                                        }
+                                        true
                                     }
                                 }
                                 else -> false
