@@ -217,12 +217,17 @@ class IdlixRepository(
      * Pre-warms the stream unlock while the user reads details. Shares one
      * in-flight job with [resolveStream]; the resolved playback is NOT cached.
      */
-    fun prewarmStream(contentType: String, contentId: String, contentTitle: String) {
+    fun prewarmStream(
+        contentType: String,
+        contentId: String,
+        contentTitle: String,
+        slug: String? = null
+    ) {
         val cacheKey = "$contentType:$contentId"
         if (activeResolves.containsKey(cacheKey)) return
         val deferred = repoScope.async {
             try {
-                resolveStreamInternal(contentType, contentId, contentTitle, onCountdown = null)
+                resolveStreamInternal(contentType, contentId, contentTitle, onCountdown = null, slug = slug)
             } finally {
                 activeResolves.remove(cacheKey)
             }
@@ -234,7 +239,8 @@ class IdlixRepository(
         contentType: String,
         contentId: String,
         contentTitle: String,
-        onCountdown: ((Int) -> Unit)? = null
+        onCountdown: ((Int) -> Unit)? = null,
+        slug: String? = null
     ): Result<ResolvedPlayback> = withContext(Dispatchers.IO) {
         val cacheKey = "$contentType:$contentId"
 
@@ -252,7 +258,7 @@ class IdlixRepository(
 
         val deferred = async {
             try {
-                resolveStreamInternal(contentType, contentId, contentTitle, onCountdown)
+                resolveStreamInternal(contentType, contentId, contentTitle, onCountdown, slug)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -269,7 +275,8 @@ class IdlixRepository(
         contentType: String,
         contentId: String,
         contentTitle: String,
-        onCountdown: ((Int) -> Unit)? = null
+        onCountdown: ((Int) -> Unit)? = null,
+        slug: String? = null
     ): Result<ResolvedPlayback> {
         try {
             var targetType = contentType
@@ -302,8 +309,13 @@ class IdlixRepository(
             // Indonesian sidecar subs. Falls back to the IDLIX guest gate
             // flow when the title has no TMDB mapping or CDN coverage.
             if (targetType == "movie") {
-                val movie = runCatching { getMovieDetail(targetId) }.getOrNull()
+                // Movy keys on TMDB ids, so the detail record must come from
+                // the slug; the hero/continue paths hand us the content UUID.
+                val movie = slug?.let { s ->
+                    runCatching { getMovieDetail(s) }.getOrNull()
+                } ?: runCatching { getMovieDetail(targetId) }.getOrNull()
                 val tmdbId = movie?.tmdbId
+                android.util.Log.d("MovyResolver", "hook: targetType=$targetType targetId=$targetId slug=$slug tmdbId=$tmdbId title=${movie?.title}")
                 if (tmdbId != null && tmdbId > 0) {
                     val year = movie.releaseDate?.take(4)?.toIntOrNull()
                     val movyTitle = movie.originalTitle?.takeIf { it.isNotBlank() }

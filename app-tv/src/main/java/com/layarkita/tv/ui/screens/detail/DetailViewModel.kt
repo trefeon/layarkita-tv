@@ -35,12 +35,17 @@ class DetailViewModel(
     // press. One key per title; the repository itself also dupe-guards.
     private var lastPrewarmedKey: String? = null
 
-    private fun maybePrewarmStream(contentType: String, contentId: String, contentTitle: String) {
+    private fun maybePrewarmStream(
+        contentType: String,
+        contentId: String,
+        contentTitle: String,
+        slug: String? = null
+    ) {
         if (contentId.isBlank()) return
         val key = "$contentType:$contentId"
         if (lastPrewarmedKey == key) return
         lastPrewarmedKey = key
-        repository.prewarmStream(contentType, contentId, contentTitle)
+        repository.prewarmStream(contentType, contentId, contentTitle, slug)
     }
 
     fun loadDetail(contentType: String, slug: String) {
@@ -82,7 +87,7 @@ class DetailViewModel(
                             isLoading = false,
                             movie = movie
                         )
-                        maybePrewarmStream("movie", movie.id, movie.title)
+                        maybePrewarmStream("movie", movie.id, movie.title, movie.slug)
                     } else {
                         _uiState.value = DetailUiState(
                             isLoading = false,

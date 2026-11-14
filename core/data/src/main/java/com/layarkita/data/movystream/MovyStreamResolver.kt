@@ -52,6 +52,7 @@ class MovyStreamResolver(
         val mediaId = tmdbId.toInt()
         var seed: String? = null
         var best: ResolvedPlayback? = null
+        android.util.Log.d("MovyResolver", "resolveMovie tmdbId=$tmdbId title=$title year=$year")
         for (provider in providers) {
             try {
                 val currentSeed = seed ?: fetchSeed(mediaId)?.also { seed = it } ?: continue
@@ -60,6 +61,7 @@ class MovyStreamResolver(
                 val parsed = Json.parseToJsonElement(plain).jsonObject
                 val sources = parsed["sources"]?.jsonArray ?: continue
                 val src = pickBestSource(sources) ?: continue
+                android.util.Log.d("MovyResolver", "video via $provider: ${src.quality}")
                 best = ResolvedPlayback(
                     title = title,
                     hlsMasterUrl = src.url,
@@ -67,20 +69,32 @@ class MovyStreamResolver(
                     sourceOrigin = MOVY_ORIGIN
                 )
                 break
-            } catch (_: Exception) {
-                // Coverage gap, seed expiry, or decode failure — next provider.
+            } catch (e: Exception) {
+                android.util.Log.d("MovyResolver", "$provider failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
-        val video = best ?: return@withContext null
+        val video = best ?: run {
+            android.util.Log.d("MovyResolver", "no video from any provider")
+            return@withContext null
+        }
         if (video.subtitles.isEmpty()) {
             // Video-only provider (Miami/Boise 1080p–2160p): sweep the rest
-            // for sidecar tracks — Dallas carries Indonesian WebVTT, Seattle EN.
+            // for sidecar tracks — Dallas carries Indonesian WebVTT. Some
+            // providers answer the sweep with a PLAIN JSON envelope instead
+            // of an encrypted payload, so accept both shapes. Dallas's first
+            // response can exceed 12s; the client's read timeout must cover it.
             for (provider in providers) {
                 try {
                     val currentSeed = seed ?: continue
-                    val payload = fetchSources(provider, title, year, tmdbId, imdbId, currentSeed) ?: continue
-                    val plain = decrypt(payload, currentSeed, mediaId) ?: continue
-                    val parsed = Json.parseToJsonElement(plain).jsonObject
+                    val payload = fetchSourcesRaw(provider, title, year, tmdbId, imdbId, currentSeed)
+                    if (payload == null) continue
+                    val parsed: kotlinx.serialization.json.JsonObject =
+                        if (payload.trimStart().startsWith("{")) {
+                            Json.parseToJsonElement(payload.trim()).jsonObject
+                        } else {
+                            val plain = decrypt(payload, currentSeed, mediaId) ?: continue
+                            Json.parseToJsonElement(plain).jsonObject
+                        }
                     val subs = parseSubtitles(parsed)
                     if (subs.isNotEmpty()) return@withContext video.copy(subtitles = subs)
                 } catch (_: Exception) {
@@ -131,6 +145,30 @@ class MovyStreamResolver(
     }.getOrNull()
 
     private fun getText(url: String): String? = getJson(url)
+
+    /**
+     * Same as [fetchSources] but returns plain JSON envelopes untouched —
+     * the subtitle sweep must see them (some providers answer unencrypted).
+     */
+    private fun fetchSourcesRaw(
+        provider: String,
+        title: String,
+        year: Int?,
+        tmdbId: Long,
+        imdbId: String?,
+        seed: String
+    ): String? {
+        val url = buildString {
+            append(base).append('/').append(provider).append("/sources?")
+            append("title=").append(percentEncode(percentEncode(title)))
+            append("&mediaType=movie")
+            if (year != null && year > 1900) append("&year=").append(year)
+            append("&tmdbId=").append(tmdbId)
+            if (!imdbId.isNullOrBlank()) append("&imdbId=").append(percentEncode(percentEncode(imdbId)))
+            append("&enc=2&seed=").append(percentEncode(seed))
+        }
+        return getText(url)?.trim()
+    }
 
     private fun request(url: String) = Request.Builder()
         .url(url)
@@ -292,8 +330,10 @@ class MovyStreamResolver(
             (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
+            // Dallas (the Indonesian-sub provider) is slow — first response
+            // can take >12s, so read headroom must exceed the old 12s.
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
             .build()
     }
 }

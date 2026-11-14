@@ -185,7 +185,8 @@ class PlayerViewModel(
                 contentTitle = title,
                 onCountdown = { sec ->
                     _uiState.value = _uiState.value.copy(countdownSeconds = sec)
-                }
+                },
+                slug = currentSlug
             )
 
             result.onSuccess { resolved ->
